@@ -21,6 +21,8 @@ public record ChannelViewModel(
     ChannelPlayoutMode PlayoutMode,
     int? MirrorSourceChannelId,
     TimeSpan? PlayoutOffset,
+    StreamingEngine StreamingEngine,
+    NextEngineTextSubtitleMode NextEngineTextSubtitleMode,
     StreamingMode StreamingMode,
     int? WatermarkId,
     int? FallbackFillerId,

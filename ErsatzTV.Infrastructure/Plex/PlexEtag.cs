@@ -27,6 +27,10 @@ public class PlexEtag
         // video updated at
         bw.Write(response.UpdatedAt);
 
+        // video title
+        bw.Write((byte)FieldKey.Title);
+        bw.Write(response.Title ?? string.Empty);
+
         foreach (PlexMediaResponse<PlexPartResponse> media in response.Media)
         {
             // media id
@@ -105,7 +109,7 @@ public class PlexEtag
         }
 
         ms.Position = 0;
-        byte[] hash = SHA1.Create().ComputeHash(ms);
+        byte[] hash = SHA1.HashData(ms);
         return Convert.ToHexString(hash);
     }
 
@@ -152,7 +156,7 @@ public class PlexEtag
         }
 
         ms.Position = 0;
-        byte[] hash = SHA1.Create().ComputeHash(ms);
+        byte[] hash = SHA1.HashData(ms);
         return Convert.ToHexString(hash);
     }
 
@@ -190,7 +194,7 @@ public class PlexEtag
         }
 
         ms.Position = 0;
-        byte[] hash = SHA1.Create().ComputeHash(ms);
+        byte[] hash = SHA1.HashData(ms);
         return Convert.ToHexString(hash);
     }
 
@@ -286,7 +290,7 @@ public class PlexEtag
         }
 
         ms.Position = 0;
-        byte[] hash = SHA1.Create().ComputeHash(ms);
+        byte[] hash = SHA1.HashData(ms);
         return Convert.ToHexString(hash);
     }
 
@@ -311,7 +315,7 @@ public class PlexEtag
         bw.Write(response.Smart ?? "0");
 
         ms.Position = 0;
-        byte[] hash = SHA1.Create().ComputeHash(ms);
+        byte[] hash = SHA1.HashData(ms);
         return Convert.ToHexString(hash);
     }
 
@@ -330,6 +334,7 @@ public class PlexEtag
 
         Thumb = 20,
         Art = 21,
+        Title = 22,
 
         File = 30,
         Key = 31,

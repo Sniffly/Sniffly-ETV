@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO.Abstractions;
 using System.Security.Cryptography;
@@ -9,8 +10,10 @@ using Dapper;
 using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Extensions;
+using ErsatzTV.Core.Security;
 using ErsatzTV.Infrastructure.Data;
 using ErsatzTV.Infrastructure.Extensions;
+using Humanizer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -87,16 +90,20 @@ public abstract class ExtractEmbeddedSubtitlesHandlerBase(IFileSystem fileSystem
         return result;
     }
 
-    protected async Task ExtractSubtitles(
+    protected async Task<bool> ExtractSubtitles(
         TvContext dbContext,
         int mediaItemId,
         string ffmpegPath,
         CancellationToken cancellationToken)
     {
+        bool extractedAnything = false;
+
         foreach (MediaItem mediaItem in await GetMediaItem(dbContext, mediaItemId, cancellationToken))
         {
             foreach (List<Subtitle> allSubtitles in GetSubtitles(mediaItem))
             {
+                var sw = Stopwatch.StartNew();
+
                 var subtitlesToExtract = new List<SubtitleToExtract>();
 
                 // find each subtitle that needs extraction
@@ -129,6 +136,12 @@ public abstract class ExtractEmbeddedSubtitlesHandlerBase(IFileSystem fileSystem
                     .Add("-hide_banner")
                     .Add("-i").Add(mediaItemPath);
 
+                var subtitleIndexes = allSubtitles
+                    .Filter(s => s.SubtitleKind is SubtitleKind.Embedded)
+                    .OrderBy(s => s.StreamIndex)
+                    .Select(s => s.StreamIndex)
+                    .ToList();
+
                 foreach (SubtitleToExtract subtitle in subtitlesToExtract)
                 {
                     string fullOutputPath = Path.Combine(FileSystemLayout.SubtitleCacheFolder, subtitle.OutputPath);
@@ -138,7 +151,7 @@ public abstract class ExtractEmbeddedSubtitlesHandlerBase(IFileSystem fileSystem
                         File.Delete(fullOutputPath);
                     }
 
-                    args.Add("-map").Add($"0:{subtitle.Subtitle.StreamIndex}")
+                    args.Add("-map").Add($"0:s:{subtitleIndexes.IndexOf(subtitle.Subtitle.StreamIndex)}")
                         .Add("-c:s").Add(subtitle.Subtitle.Codec == "mov_text" ? "text" : "copy")
                         .Add(fullOutputPath);
                 }
@@ -147,6 +160,8 @@ public abstract class ExtractEmbeddedSubtitlesHandlerBase(IFileSystem fileSystem
                     .WithArguments(args.Build())
                     .WithValidation(CommandResultValidation.None)
                     .ExecuteBufferedAsync(cancellationToken);
+
+                sw.Stop();
 
                 if (result.ExitCode == 0)
                 {
@@ -157,22 +172,34 @@ public abstract class ExtractEmbeddedSubtitlesHandlerBase(IFileSystem fileSystem
                             new { SubtitleId = subtitle.Subtitle.Id, Path = subtitle.OutputPath });
                     }
 
-                    logger.LogDebug("Successfully extracted {Count} subtitles", subtitlesToExtract.Count);
+                    logger.LogDebug(
+                        "Successfully extracted {Count} subtitles in {Duration}",
+                        subtitlesToExtract.Count,
+                        sw.Elapsed.Humanize());
+
+                    extractedAnything = true;
                 }
                 else
                 {
-                    logger.LogError("Failed to extract subtitles. {Error}", result.StandardError);
+                    logger.LogError(
+                        "Failed to extract subtitles in {Duration}. {Error}",
+                        sw.Elapsed.Humanize(),
+                        result.StandardError);
                 }
             }
         }
+
+        return extractedAnything;
     }
 
-    protected async Task ExtractFonts(
+    protected async Task<bool> ExtractFonts(
         TvContext dbContext,
         int mediaItemId,
         string ffmpegPath,
         CancellationToken cancellationToken)
     {
+        bool extractedAnything = false;
+
         foreach (MediaItem mediaItem in await GetMediaItem(dbContext, mediaItemId, cancellationToken))
         {
             MediaVersion headVersion = mediaItem.GetHeadVersion();
@@ -215,6 +242,7 @@ public abstract class ExtractEmbeddedSubtitlesHandlerBase(IFileSystem fileSystem
                 if (fileSystem.File.Exists(fullOutputPath))
                 {
                     logger.LogDebug("Successfully extracted font {Font}", fontStream.FileName);
+                    extractedAnything = true;
                 }
                 else
                 {
@@ -225,6 +253,8 @@ public abstract class ExtractEmbeddedSubtitlesHandlerBase(IFileSystem fileSystem
                 }
             }
         }
+
+        return extractedAnything;
     }
 
 
@@ -262,6 +292,8 @@ public abstract class ExtractEmbeddedSubtitlesHandlerBase(IFileSystem fileSystem
 
     private static async Task<string> GetMediaItemPath(TvContext dbContext, MediaItem mediaItem)
     {
+        DateTimeOffset exp = DateTimeOffset.Now + TimeSpan.FromHours(1);
+
         MediaVersion version = mediaItem.GetHeadVersion();
 
         MediaFile file = version.MediaFiles.Head();
@@ -278,29 +310,50 @@ public abstract class ExtractEmbeddedSubtitlesHandlerBase(IFileSystem fileSystem
 
                 foreach (int plexMediaSourceId in maybeId)
                 {
-                    return $"http://localhost:{Settings.StreamingPort}/media/plex/{plexMediaSourceId}/{pmf.Key}";
+                    string sig = InternalUrlSigner.Sign(
+                        exp,
+                        "plex",
+                        $"{plexMediaSourceId}",
+                        $"{pmf.Key}");
+
+                    return $"http://localhost:{Settings.StreamingPort}/internal/media/plex/{plexMediaSourceId}/{pmf.Key}?exp={exp.ToUnixTimeSeconds()}&sig={sig}";
                 }
 
                 break;
         }
 
-        return mediaItem switch
+        switch (mediaItem)
         {
-            JellyfinMovie jellyfinMovie =>
-                $"http://localhost:{Settings.StreamingPort}/media/jellyfin/{jellyfinMovie.ItemId}",
-            JellyfinEpisode jellyfinEpisode =>
-                $"http://localhost:{Settings.StreamingPort}/media/jellyfin/{jellyfinEpisode.ItemId}",
-            EmbyMovie embyMovie => $"http://localhost:{Settings.StreamingPort}/media/emby/{embyMovie.ItemId}",
-            EmbyEpisode embyEpisode => $"http://localhost:{Settings.StreamingPort}/media/emby/{embyEpisode.ItemId}",
-            _ => file.Path
-        };
+            case JellyfinMovie jellyfinMovie:
+            {
+                string sig = InternalUrlSigner.Sign(exp, "jellyfin", $"{jellyfinMovie.ItemId}");
+                return $"http://localhost:{Settings.StreamingPort}/internal/media/jellyfin/{jellyfinMovie.ItemId}?exp={exp.ToUnixTimeSeconds()}&sig={sig}";
+            }
+            case JellyfinEpisode jellyfinEpisode:
+            {
+                string sig = InternalUrlSigner.Sign(exp, "jellyfin", $"{jellyfinEpisode.ItemId}");
+                return $"http://localhost:{Settings.StreamingPort}/internal/media/jellyfin/{jellyfinEpisode.ItemId}?exp={exp.ToUnixTimeSeconds()}&sig={sig}";
+            }
+            case EmbyMovie embyMovie:
+            {
+                string sig = InternalUrlSigner.Sign(exp, "emby", $"{embyMovie.ItemId}");
+                return $"http://localhost:{Settings.StreamingPort}/internal/media/emby/{embyMovie.ItemId}?exp={exp.ToUnixTimeSeconds()}&sig={sig}";
+            }
+            case EmbyEpisode embyEpisode:
+            {
+                string sig = InternalUrlSigner.Sign(exp, "emby", $"{embyEpisode.ItemId}");
+                return $"http://localhost:{Settings.StreamingPort}/internal/media/emby/{embyEpisode.ItemId}?exp={exp.ToUnixTimeSeconds()}&sig={sig}";
+            }
+            default:
+                return file.Path;
+        }
     }
 
     private bool FileDoesntExist(int mediaItemId, Subtitle subtitle)
     {
         foreach (string path in GetRelativeOutputPath(mediaItemId, subtitle))
         {
-            return !fileSystem.File.Exists(path);
+            return !fileSystem.File.Exists(Path.Combine(FileSystemLayout.SubtitleCacheFolder, path));
         }
 
         return false;

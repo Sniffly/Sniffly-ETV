@@ -1,13 +1,471 @@
-# Changelog
+﻿# Changelog
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 ### Changed
+- Next engine:
+  - Watermark-only graphics canvases render just the area the watermarks cover instead of the full frame
+    - This reduces CPU use and GPU upload for animated or opacity-expression watermarks
+    - This is currently limited to local watermarks; remote/URL watermarks will still send the full frame
+
+### Fixed
+- Next engine:
+  - Fix active channels falling behind schedule when the playout is updated
+  - Fix image subtitles (e.g. PGS) missing or misplaced with hardware acceleration when the subtitle size differs from the video size (e.g. cropped video)
+
+## [26.11.3] - 2026-10-13
+### Changed
+- MPEG-TS streams send their first 6 seconds immediately instead of in real time
+  - This lets clients like Plex fill their buffer and start playback sooner
+  - Custom MPEG-TS scripts can do the same by adding `-readrate_initial_burst 6` after `-readrate 1.0`
+
+### Fixed
+- Next engine:
+  - Only advertise the HLS subtitle track when the channel's text subtitle mode is `Convert`
+    - With `Burn` (the default) the track never had cues, but it froze VLC 3 when selected
+  - Fix MPEG-TS streams taking ~10 seconds longer to start than legacy engine channels
+    - MPEG-TS streams no longer request the HLS subtitle track, which they cannot use
+
+## [26.11.2] - 2026-10-13
+### Changed
+- Graphics engine: decode image and watermark elements with SkiaSharp instead of ImageSharp
+  - TIFF, TGA, PBM and QOI images are no longer supported
+- Next engine:
+  - Software scaling now defaults to `bicubic` instead of `fast_bilinear`, which reduces aliasing when downscaling
+    - This can be changed using `normalization.video.filters.scale.flags` in a channel config overlay
+  - Log messages from next channels now include the channel number, e.g. `[next::channel 7]`
+- Warn that the legacy streaming engine will be removed in ErsatzTV 26.12
+  - The Channels page lists channels that still use the legacy engine
+  - The channel editor shows a warning when the legacy engine is selected
+  - Starting a legacy engine stream logs a warning
+
+### Fixed
+- Fix sequential schedules silently skipping nested `sequence` instructions inside pre-roll, mid-roll and post-roll sequences
+- Fix local show libraries ignoring episode NFO tag and genre changes after the first scan
+- Fix playback from Jellyfin-compatible servers (e.g. Silo) that require authentication for media streams
+  - The Jellyfin API key is now included on stream and subtitle requests
+  - Jellyfin itself does not require it but continues to play successfully with the API key included
+- Next engine:
+  - Linux/macOS: fix channels failing to locate playout items after the config folder is copied or restored with a tool that replaces symlinks with real folders (e.g. `cp -L`, `rsync -L`)
+    - Failures to link the current playout folder are now logged instead of silently ignored
+  - VAAPI: fix playback freezing at the end of some items on channels with an `Intermittent` watermark
+    - Most common with music videos, whose audio often runs slightly longer than their video
+    - The log showed `channel ... terminated after ffmpeg stall`
+  - VAAPI: fix `hevc` streams hanging on content with embedded (A53) closed captions with Mesa before 26.2.3
+    - Captions are left out of `hevc` output on those Mesa versions; update Mesa to keep them
+  - Always encode 4:2:0 output, which many clients require
+    - Still images and song backgrounds were previously encoded as 4:4:4 by software encoders
+  - NVIDIA: fix streams failing with a watermark in `yuva420p` (e.g. lossy WebP with transparency) and opacity below 100%
+  - NVIDIA: fix streams with a watermark failing when encoding with software (e.g. `mpeg2video`)
+  - VideoToolbox: fix streams failing to encode to h264 when they contain embedded (A53) closed captions
+  - QSV: fix completely green output with legacy Intel encoders
+  - Fix fallback filler playback with filler content that has no audio
+  - Fix `crop` scaling mode so it always scales to cover the output before cropping, even when the source content is larger than the target resolution
+- Fix errors logged when quickly navigating to search results
+  - The log showed `Navigation failed when changing the location to search?query=...`
+  - Searches from the search bar and smart collection targets no longer reload the whole page
+
+## [26.11.1] - 2026-10-06
+### Fixed
+- Next engine:
+  - Windows: fix channels failing to locate playout items after the app data folder is copied or restored (e.g. with Explorer or a backup tool)
+    - The log showed `Expected junction at ... but found a real directory`
+  - QSV: fix `Cannot allocate memory` error when using loudness normalization with legacy runtimes (older Intel devices)
+  - VAAPI: fix green padding with HDR and other BT.2020 content on Intel devices using the iHD driver
+  - VAAPI: fix green padding on AMD devices and Intel devices using the i965 driver
+    - These drivers ignore the requested pad color, so padding is now done in software
+
+## [26.11.0] - 2026-10-05
+### Added
+- Next engine:
+  - Properly rotate content that contains orientation metadata (e.g. from phones)
+  - Add `mpeg2video` encoder support (software, some Intel QSV and Intel VAAPI devices)
+  - Add song playback support, using legacy-generated background image and text
+    - Song Video Mode `With Progress` is not supported yet; these songs play without a progress bar
+  - Support FFmpeg Profile `Normalize Frame Rate`
+    - As with the legacy engine, the target is the lowest frame rate above 23 fps among the channel's scheduled items
+    - Frames are dropped or duplicated to reach the target, instead of blended
+    - With video copy, only items already at the target rate are copied; others are transcoded
+- Add `Deep Scan Library` button to local libraries
+  - A deep scan re-probes every file and refreshes all metadata and artwork, even when files appear unchanged
+  - This forces a refresh of e.g. NFO files or posters that were edited without changing their modified time
+
+### Changed
+- Migrate all channels to the next streaming engine, and use it by default for new channels
+  - To roll back a channel, set `Streaming Engine` to `Legacy` in the channel editor
+  - Streaming mode `MPEG-TS (Legacy)` has been migrated to `MPEG-TS`
+  - Streaming mode `HLS Direct` has been migrated to `HLS Segmenter`
+    - Content is now transcoded continuously; disable `Normalize Video` or `Normalize Audio` in the FFmpeg Profile to copy that stream instead
+  - Cached `ts-legacy` and `hls-direct` URLs continue to work, and stream through the next engine
+  - FFmpeg Profiles with audio format `aac (latm)` now use `aac`
+  - FFmpeg Profiles with `V4l2m2m` hardware acceleration now use software encoding
+  - The next engine ignores these FFmpeg Profile settings: `Thread Count`, `Pad Mode`, video `Profile`, video `Preset`, `Allow B-Frames`, `VAAPI Display`, `QSV Extra Hardware Frames` and `Normalize Colors`
+    - These settings are now labeled `Legacy engine only`
+  - The next engine ignores channel `Slug Seconds`, so it is hidden for next channels
+  - Playback troubleshooting now defaults to the next engine
+- Use ErsatzTV-ffmpeg `8.1.2-4` in docker images, Windows packages and macOS packages
+  - ErsatzTV-ffmpeg releases are now immutable; docker images pin them by digest
+  - Docker images no longer include `libfdk_aac`; the built-in `aac` encoder is unchanged
+  - macOS packages now include ffmpeg and ffprobe, so Homebrew ffmpeg is no longer needed
+    - On first start, existing macOS installs switch from their configured ffmpeg and ffprobe paths to the bundled builds
+    - The FFmpeg Version health check now applies to macOS
+- Drop support for ARM32v7 docker and native versions
+- Remove `av1` video format from FFmpeg Profiles; it has not worked since `v25.7.1`
+  - Existing `av1` FFmpeg Profiles have been migrated to `hevc`
+- Add `v` prefix to docker version numbers; matching all other versions
+- Develop builds:
+  - Use expected upcoming version number in develop builds
+    - e.g. if latest release is `v26.10.0`, develop builds will use `v26.11.0`
+  - Show unreleased changelog notes on home page of develop builds
+  - Publish immutable develop builds to a separate new repository
+    - https://github.com/ErsatzTV/legacy-develop-builds/releases/latest
+- Local libraries: use video stream duration instead of container duration for scheduling
+  - This fixes playback failures caused by e.g. embedded subtitles longer than the video itself
+- Ask for confirmation before deep scanning a library or external collections
+- Next engine:
+  - Improve watermark quality with VAAPI and QSV by avoiding an unnecessary lossy color conversion
+  - Optimize intermittent watermarks by converting the watermark image once instead of on every frame
+  - FFmpeg Profiles with `Normalize Video` or `Normalize Audio` disabled now copy that stream; they were previously transcoded to `h264` / `aac`
+    - Items that cannot be copied are transcoded using the profile's settings
+      - e.g. items with burned-in subtitles, still images, and source codecs that are not copied by default
+      - `h264` / `hevc` video can be copied by default, `aac` / `ac3` / `eac3` / `mp3` audio can be copied by default
+      - These items are transcoded without hardware acceleration; to use hardware acceleration, set `accel` in a channel config overlay
+        - e.g. `{"version":"https://ersatztv.org/channel/version/0.1.0","normalization":{"video":{"accel":"qsv"}}}`
+    - Watermarks and graphics are not applied to copied video, matching the legacy engine
+    - Loudness normalization is never applied to copied audio
+  - **BREAKING**: channel config overlays (`next/channel-config-overlays/default.json` and `{number}.json` in ETV's config folder) must include `"version": "https://ersatztv.org/channel/version/0.1.0"`
+    - Overlays without this version are rejected, and the channel will not start
+    - e.g. `{"version":"https://ersatztv.org/channel/version/0.1.0","fallback":{"show_error":false}}`
+    - Overlays that used `"format": null` to copy should use `"mode": "copy"` instead
+
+### Fixed
+- Next engine:
+  - QSV: enable hardware acceleration on legacy Intel Media SDK devices on Windows (e.g. Haswell)
+    - Windows packages now include `libvpl.dll`, which next engine uses to detect QSV capabilities
+    - Find the runtime when the Intel GPU is not the primary display adapter, or when the runtime does not report a device ID
+    - Fix `Error synchronizing the operation: -17` at the start of a stream
+    - Fix `device failed (-17)` from `vpp_qsv` and `overlay_qsv`
+  - QSV: pad in software when the runtime cannot pad the current pixel format in hardware (e.g. 10-bit on legacy Media SDK runtimes)
+  - QSV: do not upload 10-bit frames to hardware on runtimes that cannot copy them (e.g. Haswell)
+  - QSV: fix `Cannot allocate memory` error when using loudness normalization and the graphics engine
+  - VideoToolbox: fix HEVC output bit depth not matching the FFmpeg Profile
+  - VideoToolbox: fix missing sample aspect ratio in H264 output
+  - NVIDIA: fix ffmpeg warning when CUDA and Vulkan are used together
+  - Fix AMD VAAPI hardware acceleration when FFmpeg Profile is configured with VAAPI Driver `Default`
+  - Fix performance regression with permanent and intermittent watermarks by overlaying them directly instead of using the graphics engine
+  - Fix watermark opacity having no effect on images without transparency (e.g. JPG)
+  - Fix subtitle selection preferring embedded text subtitles that have not been extracted
+    - These subtitles were selected over usable sidecar subtitles, and then dropped, leaving no subtitles
+    - The FFmpeg `Use Embedded Subtitles` setting is now respected by next engine channels
+  - Fix playback of audio-only content (e.g. audio files with embedded cover art), which now plays over a black background
+  - Fix image playback
+  - Fix image and remote stream duration
+  - Fix process signal handling to prevent orphaned processes
+    - When ErsatzTV exits unexpectedly (crash, killed), next engine channels now stop within a few seconds instead of running for up to 90 seconds
+    - When a next engine channel process is killed, its ffmpeg process now stops too (Linux and Windows)
+    - Stopping a next engine channel with `SIGTERM` or `SIGINT` now also stops its ffmpeg process
+  - Fix channels going permanently empty when content ends before its scheduled duration
+    - e.g. files with an embedded subtitle track that runs longer than the audio and video
+    - The rest of the scheduled time now plays the black/silence fallback
+    - Fix audio/video sync loss at the end of such content
+  - Fix timestamps restarting at zero between items when `ffprobe` is not on the system `PATH`
+  - Ignore unextracted text subtitles when using custom stream selector
+  - Fix channel playback troubleshooting, which always used the legacy engine
+    - Channel troubleshooting plays 30 seconds from the selected time, including transitions between items and fallback filler for gaps
+  - Fix troubleshooting playback stopping before the end of the transcoded content
+- Improve performance of graphics engine subtitle elements
+- Fix Jellyfin 12 shows that belong to a Jellyfin collection being replaced by the collection itself
+  - The collection would appear as a show, and the real show would be flagged as missing
+  - To repair affected libraries after updating:
+    - Scan the affected Jellyfin show libraries
+    - Empty the trash to remove the bogus collection shows
+    - Deep scan Jellyfin collections to restore collection search results
+- Fix `Unified Docker` health check incorrectly warning about a deprecated docker tag on arm64 hardware using the default docker image
+- Fix bug where block schedules could skip and/or repeat items
+- Fix songs changing their background ~40 seconds after joining a channel
+- Fix troubleshooting playback to start exactly at the specified seek point (hls.js player often started a segment or two late)
+
+## [26.10.0] - 2026-09-21
+### Added
+- Next engine:
+  - Add full graphics engine support
+  - Add hardware-accelerated padding for QSV on Windows, Linux and Docker (note that this requires the latest ETV custom ffmpeg build)
+  - Enable `av1`, `vc1`, `vp8`, `vp9` hardware decoding using QSV when supported by GPU
+  - Add hardware-accelerated HDR10 tonemapping using QSV when supported by GPU
+  - Add AMF capability detection (AMD on Windows)
+  - Add AMF hardware-accelerated decoding for AV1, H264, HEVC, MPEG2, VC1, VP9
+    - MPEG2 hardware decoding requires the latest ETV custom ffmpeg build
+  - Add AMF hardware-accelerated scaling
+  - Add AMF hardware-accelerated tonemap
+  - Auto-select best AMF (AMD) device in multi-gpu systems
+- Periodically delete unused artwork from cache folder on disk
+- Probe Dolby Vision and HDR10 metadata in local library content
+  - All HDR content in local libraries will be re-scanned once after updating to refresh this metadata
+- Add music video credits drop down to playback troubleshooter
+
+### Changed
+- Next engine:
+  - Deinterlace with `send_frame` mode by default; this maintains fps and is significantly more performant. `send_field` and other modes can still be used via channel config.
+  - Optimize anamorphic pipelines by only performing one scale instead of two
+  - Optimize tonemapping pipelines by downscaling before tonemapping when possible
+  - Optimize QSV pipelines by merging consecutive vpp_qsv filters as much as possible (e.g. tonemap, scale and format using a single filter)
+  - Show error messages over black/silence fallback streams by default
+    - To disable, create the file `next/channel-config-overlays/default.json` in ETV's config folder with the contents `{"fallback":{"show_error":false}}`
+- Graphics engine:
+  - Use `Seek Seconds` in playback troubleshooter directly as `MediaItem_SeekSeconds` in templates
+    - Previously, `MediaItem_SeekSeconds` was always zero, so graphics elements often started wherever troubleshooting playback started instead of being anchored
+
+### Fixed
+- Next engine:
+  - Fix many issues with subtitles that caused black/silence (error output from next)
+  - Fix AAC audio encoding when FFmpeg Profile is configured to output more than 2 channels
+- Fix health checks causing a flood of (harmless) logged errors when quickly navigating away from home page
+  - Health check results will now be cached for 5 minutes by default; a refresh button has been added to immediately re-run all checks
+- Fix `/api/sessions` response when channels use Next streaming engine
+- Save and restore sequential schedule mid-roll, post-roll, and graphics state between builds
+- Fix subtitle playback with Plex other video libraries
+- Fix Plex other video tag generation when Plex server and ETV server use different path separators (i.e. Windows and Linux)
+- Graphics engine:
+  - Fix motion element timing, including hold behavior when seeking into hold
+- Many reliability fixes to playback troubleshooter; e.g. so it doesn't stay locked until ETV is restarted
+- Improve local library path validation
+  - Paths must now be absolute; e.g. a relative path saved on macOS could previously break all future edits to that library
+  - Validation errors now include the problematic path
+- Fix custom ordering of manual (movie) collections to support dragging posters instead of just titles
+- Fix remote stream libraries to allow `.yaml` extension (previously only allowed `.yml`)
+
+## [26.9.0] - 2026-09-06
+### Fixed
+- Fix text subtitle playback (regression from `v26.8.1`)
+- Next engine:
+  - Properly detect QSV capabilities for Intel 10th gen and older devices; previously they always used software transcoding
+- Fix block scheduler deleting the current hour's playout items, taking the channel offline until the next block
+- Fix playlists and marathons not continuing from the saved position after a restart or a playout rebuild
+  - Sequential and scripted schedules first build after upgrading may still start at the wrong item; every build after that will be correct
+- Fix fallback duration, history and guide group for sequential and scripted schedules
+- Fix shuffled playlists and marathons (`shuffle_groups`) playing the wrong content after the first full cycle
+- Fix multiple causes of playout build hangs
+- Fix **Skip Missing Items** being ignored by multi-collection shuffle, shuffle in order, and playlists
+- Sequential schedules:
+  - Fix `shuffle_sequence` losing the shuffled order at the end of each build; previously the next build continued in schedule file order
+  - Fix `shuffle_sequence` deleting the instructions between two uses of the same sequence
+  - Fix a sequence that is used two times giving the `custom_title` of the last use to every use
+  - Fix a shuffled sequence with `repeat` making the build run with no end; this stopped all other background work
+- Fix bug in XMLTV template for episodes that was breaking thumbnail artwork
+  - Those with customized `episode.sbntxt` templates will want to make a similar fix
+- Disable HDHR endpoints when JWT is used; they never worked in this configuration in the first place
+- Fix scanners deleting, duplicating and stranding each other's tags; tags now track which scanner owns them
+  - Symptoms included:
+      - A show losing every tag when it changed networks (dropping it from collections and schedules)
+      - Networks vanishing after a library scan
+      - Labels or collections that were renamed or deleted on the media server never going away in ETV
+  - To recover a show that already lost its tags: deep scan it from the show page, then use **Deep Scan Collections** on the libraries page
+  - `<country>` from NFO metadata is now searchable with `country:` instead of `tag:`; deep scan a local library to convert existing items
+- Fix multiple channel startup failure causes
+- Fix seeking more than 24 hours into content
+- Fix local movie and television folder scanner to only set etag when all files process successfully
+  - Previously, errors would be ignored so problematic files (e.g. malformed nfo files) would need to be touched for ETV to attempt reading them again
+- Fix library collisions caused by Emby returning specials within normal seasons
+- Fix Plex, Emby, Jellyfin episode updates when season has changed but episode is otherwise unchanged
+- Fix episode title being hidden behind fanart in ETV UI, caused by missing season artwork
+
+## [26.8.1] - 2026-08-29
+### Security
+- Fix GHSA-h3r4-r2f2-qf59 (CVE-PENDING)
+  - All users who link Plex or Emby media servers should upgrade as soon as possible
+  - **After upgrading, it is highly recommended to rotate your Plex token and Emby API key**
+    - To rotate Plex token:
+      - In **Media Sources** > **Plex** click **Re-authenticate with Plex** and complete the sign in to generate a new token
+      - Restart ErsatzTV so it picks up the new token immediately; connection details are cached for up to 30 minutes
+      - In https://app.plex.tv/ **Account Settings** > **Authorized Devices** delete the old ErsatzTV authorized device
+      - Restart the Plex server to immediately invalidate the token that the old authorized device used
+    - To rotate Emby API key:
+      - Generate new API key in Emby's **Dashboard** > **Advanced** > **API Keys**
+      - In **Media Sources** > **Emby** click **Edit Emby Connection**, paste the new API key and click **Save Changes**
+      - Delete the old API key in Emby's **API Keys** screen
+  - Jellyfin users are not affected and have no reason to rotate the API key
+- Fix case where specifically-crafted requests could access management UI over streaming port
+
+### Added
+- Add `Re-authenticate with Plex` button to the Plex media sources page
+  - Use this to replace the credentials ErsatzTV uses (after a Plex password reset, or after signing out of all Plex devices) without removing media sources or synchronized content
+  - This registers ErsatzTV with Plex as a new device, so Plex issues a new token; signing in again previously returned the same token
+  - To revoke the old token, remove the old `ErsatzTV` entry from `Authorized Devices` at plex.tv and restart your Plex server
+
+### Changed
+- **BREAKING CHANGE**: require `X-Etv-Api-Key` header for all API requests under `/api`
+  - The API key is automatically created at startup and can be found in the `api-secrets.json` file in the config folder
+  - Scripted schedule scripts are passed the API key in the `ETV_API_KEY` environment variable, and must send it in the `X-Etv-Api-Key` header on every call
+    - The key is not passed as a command line argument, so it does not appear in the process list or in logs
+    - Scripts that use the bundled docker entrypoint (`/app/scripted-schedules/entrypoint.py`) need no changes
+    - Hand-written scripts and generated clients must be updated; the API key security scheme is now included in the OpenAPI descriptions
+  - Troubleshooting playback endpoints are requested directly by the browser, so they authorize with the management UI session instead of the API key
+- Plex servers that are no longer listed at plex.tv are now flagged instead of deleted
+  - Previously, re-authenticating before re-claiming a server at app.plex.tv would delete that server along with its libraries and all of its media
+  - Flagged servers are skipped during scans, and are removed only when you choose to remove them
+
+### Fixed
+- Fix Plex page staying disabled until restart when a sign-in is not completed within two minutes, or when plex.tv cannot be reached
+- Fix Plex page showing no indication that ErsatzTV has been signed out of Plex
+- Fix mirror channels falling out of sync when using the next streaming engine
+
+## [26.8.0] - 2026-08-20
+### Added
+- Add `Streaming Engine` dropdown to playback troubleshooter to support troubleshooting Next engine playback
+- Next engine
+  - Use `overlay_qsv` for hardware-accelerated watermarks and image subtitles
+  - Support multiple watermarks (still only `permanent` and `intermittent` modes, not `opacity expression`)
+  - Support image graphics elements that do not use an opacity expression
+
+### Changed
+- Upgrade Mesa driver in docker from 25.2.8 to 26.0.3 to fix issues with hevc_vaapi encoder when using radeonsi driver
+
+### Fixed
+- Bundle new ffmpeg 8.1.2 build on Windows that is patched to fix
+  - Vulkan/CUDA interop (libplacebo tonemapping)
+  - Unexpected slow performance with image subtitles
+- Enable Vulkan/CUDA interop (libplacebo tonemapping) in Docker, using Legacy and Next streaming engines
+- Fix regression from `v26.6.0` that caused external (sidecar) subtitles from Jellyfin and Emby to go missing
+  - All Jellyfin external subtitles were deleted by hourly maintenance, so they were missing from **Troubleshooting** > **Playback** and were never burned in
+  - Jellyfin and Emby items with multiple external subtitles would keep only one of them after a scan
+  - External subtitles will be restored automatically the next time each Jellyfin or Emby library is scanned
+- Fix regression from `v26.6.0` that broke `MPEG-TS` channels on Windows when the channel name or the ffmpeg path contains non-english characters (like `Télévision`)
+  - Affected channels would connect but never send any data
+  - `MPEG-TS (Legacy)` and channel preview were not affected
+  - Custom MPEG-TS scripts can now use the `ETV_CHANNEL_NAME`, `ETV_HLS_URL` and `ETV_FFMPEG_PATH` environment variables, which are not affected by this issue; the `{{ ChannelName }}`, `{{ HlsUrl }}` and `{{ FFmpegPath }}` template variables continue to work but remain affected
+- Next engine
+  - Fix audio dropout/desync when using QSV accel and loudness normalization with certain content
+  - Fix anamorphic content scaling (was incorrectly stretched with older builds)
+  - Fix on-demand channel progress (channels would not save checkpoints and would always start at the same spot)
+
+## [26.7.1] - 2026-07-31
+### Changed
+- Change rule for how `Flexible` fixed start times work in classic schedules
+  - Previously, flexible waited only for start times later in the same *calendar day*
+    - This caused undesired behavior near midnight
+      - A flexible start time of 23:55 when the current playout is at 00:05 would wait nearly a full day
+      - A flexible start time of 00:30 when the current playout is at 23:50 would start immediately instead of waiting 40 minutes
+  - Now, flexible will only wait when the desired start time is <= 12 hours after the current time, otherwise it will start immediately
+  - `Strict` behavior is unchanged
+
+### Fixed
+- Bundle new ffmpeg 8.1.2 build that is patched to fix QSV on Windows
+- Fix regression from `v26.2.0` that caused channel logo watermarks to be ignored when the logo is a url
+  - This affected external logo urls and generated channel logos
+- Maintain collection progress when refreshing a classic playout containing playlists
+- Fix UI bug where on-demand channels would always show out of date gaps (unscheduled time)
+- Fix UI bug where gaps (unscheduled time) would be shown from previous playout build, not current build
+
+## [26.7.0] - 2026-07-27
+### Added
+- Show Legacy, Next and FFmpeg versions in **Troubleshooting** > **General**
+
+### Changed
+- Upgrade all bundled versions of ffmpeg from 7.1 to 8.1.2
+  - Other versions (`linux64` and `linuxarm64`) are available at https://github.com/ErsatzTV/ErsatzTV-ffmpeg/releases/tag/8.1.2
+
+### Fixed
+- Update Plex movie and other video titles when changed from Plex
+  - The first library scan after updating will act like a deep scan due to adding title to the Plex etag calculation
+  - Future periodic scans will update titles in ETV automatically (deep scans will not be required to update titles)
+- Randomize start points on playlist items in classic schedules when setting is enabled
+  - Playlists ignored this setting in earlier builds
+- Always randomize start points for all collections the first time they are used
+  - Previously, only collections scheduled during the first day of a playout build had their start points randomized
+- Allow multiple ETV instances when multiple config folders are used
+- Maintain collection progress when refreshing a classic playout
+  - Classic playouts save a checkpoint for each day they build, and refresh rewinds to the checkpoint for the current day
+  - Checkpoints were only saved when a build happened to stop on a day boundary, so playouts with long items (movies, long blocks) were often missing the checkpoint for the current day, and refreshing those restarted every collection from the beginning
+  - Checkpoints are now saved whenever a build crosses midnight
+- Fix case where shuffled collection progress would reset early
+  - This only happened when also grouping episodes (e.g. `Keep Multi-Part Episodes Together`)
+  - More groups made it more likely to happen
+- Fix marathons and playlists that would never pick a new order
+  - `Marathon Shuffle Groups` and `Shuffle Playlist Items` choose a new order every time everything has played once
+  - Content that can never play was still counted as waiting to play, so that never happened and the order stayed the same forever
+  - This was caused by specials (season 0), which are skipped by `Season, Episode` order; marathons grouped by show or season use that order unless `Marathon Shuffle Items` is enabled
+  - Affected playouts also became slower to build the longer they ran
+- Fix shuffled playlists and marathon groups changing order when a playout is rebuilt (continued or refreshed)
+  - Existing playlists and marathons will change order once after updating
+- Fix playlists used as filler skipping content
+  - When something doesn't fit, ETV puts the filler back where it was and tries again, but playlists were only partly put back
+  - This could skip playlist content, and could cause the next playout build to resume in the wrong place
+- Fix case where block playouts would occasionally get stuck building forever
+- Fix green line sometimes seen with NVIDIA and AMD/VAAPI encoding
+  - Both bugs were in ffmpeg, and ETV's patched ffmpeg 8.1.2 is required for the fixes
+- Pass extracted subtitle paths to next engine; this fixes text subtitle burn-in when extraction is enabled
+  - Embedded text subtitles will otherwise be ignored and unused (when extraction is disabled)
+- Fix next engine music video playback when music video credits are disabled
+- Fix playback when seeking into content beyond final text subtitle cue
+
+## [26.6.0] - 2026-07-09
+### Added
+- Add channel config overlay system for Next engine
+  - The channel config schema can be found at https://github.com/ErsatzTV/next/blob/main/schema/channel_config.json
+  - Config overlays should be created in the config subfolder `next/channel-config-overlays`
+    - A config file named `default.json` will apply to all channels using the Next engine
+    - A config file named `{channel_number}.json` (e.g. `1.json`) will apply to the channel with that number
+  - Channel overlays will override values from the default overlay which will override values from the FFmpeg Profile
+- Add `epg_entries` support to image graphics elements
+- Add (date-range based) alternate schedule system for sequential schedules
+
+### Fixed
+- Fix HLS Direct playback when JWT auth is also used
+- Use configured ffmpeg path for motion and subtitle graphics elements
+  - Previously, these elements required ffmpeg to be on PATH
+- Fix erroneous warning `Unable to locate MPEG-TS Script in folder Default` on installations with case-sensitive file systems
+- Improve speed of motion graphics element compositing
+- Fix multiple issues with subtitle handling in local libraries which impacted stream selection
+  - Content with multiple sidecar subtitles would incorrectly have the subtitle metadata merged (like language)
+  - More rarely, content with an embedded subtitle that has stream index zero would create invalid subtitle records
+  - Both cases will automatically be cleaned up during the next local library scan
+- Use `und` language tag with sidecar subtitles that have no language in the file name
+- Automatically remove already-played playout items from all on demand channels
+- Automatically remove already-played playout items from (continuous) scripted schedules
+- Extract embedded text subtitles (when enabled in settings) on channels that use custom stream selectors
+- Fix subtitle playback using Next streaming engine
+- Fix bug where search results for deleted manual collections would continue to appear
+- Fix synchronizing subtitle titles from Plex content; this may never have worked previously
+
+### Changed
+- Upgrade Intel driver in docker containers to support latest Battlemage devices (e.g. B70)
+- Restore release notes section on home page, since bugs continue to be fixed
+
+## [26.5.1] - 2026-05-08
+### Fixed
+- Fix NVIDIA playback on Linux using legacy streaming engine
+- Fix cause of unnecessarily large database when using Emby or Jellyfin libraries
+  - This was caused by orphaned actor and actor artwork records, which will be cleaned up hourly
+  - When you see logs like `No orphaned actors to delete` and `No orphaned artwork to delete`, you can then reclaim disk space by:
+    - Stopping ErsatzTV Legacy
+    - Running `sqlite3 ersatztv.sqlite3 'PRAGMA wal_checkpoint(TRUNCATE); VACUUM;'` in your config folder
+- Fix Next Engine playout sync when channel is configured to use channel logo as watermark
+
+## [26.5.0] - 2026-05-08
+### Added
+- Add `Streaming Engine` setting to Channel
+  - `Legacy` - (default) uses existing streaming engine
+  - `Next` - uses ErsatzTV Next streaming engine
+- Add `Next Engine Text Subtitle Mode` setting to Channel
+  - `Burn` - (default) will burn all subtitles, including text subtitles
+  - `Convert If Possible` - will attempt to convert text subtitles to WebVTT
+    - WebVTT subtitles can be dynamically enabled and disabled during playback in supported HLS clients
+
+### Fixed
+- Fix `Add Playout` button not opening drop down menu (regression from v26.4.0)
+- Consistently apply playout offset when generating XMLTV
+- Schedule all required fallback filler in classic schedules
+- Don't extract embedded subtitles that have already been extracted
+
+## [26.4.0] - 2026-04-18
+### Changed
+- Re-branded as `ErsatzTV Legacy`
 - Remove BugSnag error reporting integration
 - Remove developer's personal Trakt API key
   - Users who want to continue to use Trakt must create an API app and set the `Client ID` as the environment variable `TRAKT__CLIENTID`
+- Remove GitHub changelog from home screen
 
 ### Fixed
 - Support adding trakt lists using `app.trakt.tv` domain (instead of just `trakt.tv`)
@@ -1659,7 +2117,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Use VP9 hardware-accelerated decoder with VAAPI when available
 
 ### Fixed
-- Align default docker image (no acceleration) with new images from [ErsatzTV-ffmpeg](https://github.com/ErsatzTV/ErsatzTV-ffmpeg)
+- Align default docker image (no acceleration) with new images from [ErsatzTV-ffmpeg](https://github.com/ErsatzTV/legacy-ffmpeg)
 - Fix some transcoding pipelines that use software decoders
 - Improve VAAPI encoder capability detection on newer hardware
 - Fix trash page to properly display episodes with missing metadata or titles
@@ -3199,144 +3657,158 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Initial release to facilitate testing outside of Docker.
 
 
-[Unreleased]: https://github.com/ErsatzTV/ErsatzTV/compare/v26.3.0...HEAD
-[26.3.0]: https://github.com/ErsatzTV/ErsatzTV/compare/v26.2.0...v26.3.0
-[26.2.0]: https://github.com/ErsatzTV/ErsatzTV/compare/v26.1.1...v26.2.0
-[26.1.1]: https://github.com/ErsatzTV/ErsatzTV/compare/v26.1.0...v26.1.1
-[26.1.0]: https://github.com/ErsatzTV/ErsatzTV/compare/v25.9.0...v26.1.0
-[25.9.0]: https://github.com/ErsatzTV/ErsatzTV/compare/v25.8.0...v25.9.0
-[25.8.0]: https://github.com/ErsatzTV/ErsatzTV/compare/v25.7.1...v25.8.0
-[25.7.1]: https://github.com/ErsatzTV/ErsatzTV/compare/v25.7.0...v25.7.1
-[25.7.0]: https://github.com/ErsatzTV/ErsatzTV/compare/v25.6.0...v25.7.0
-[25.6.0]: https://github.com/ErsatzTV/ErsatzTV/compare/v25.5.0...v25.6.0
-[25.5.0]: https://github.com/ErsatzTV/ErsatzTV/compare/v25.4.0...v25.5.0
-[25.4.0]: https://github.com/ErsatzTV/ErsatzTV/compare/v25.3.1...v25.4.0
-[25.3.1]: https://github.com/ErsatzTV/ErsatzTV/compare/v25.3.0...v25.3.1
-[25.3.0]: https://github.com/ErsatzTV/ErsatzTV/compare/v25.2.0...v25.3.0
-[25.2.0]: https://github.com/ErsatzTV/ErsatzTV/compare/v25.1.0...v25.2.0
-[25.1.0]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.8.8-beta...v25.1.0
-[0.8.8-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.8.7-beta...v0.8.8-beta
-[0.8.7-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.8.6-beta...v0.8.7-beta
-[0.8.6-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.8.5-beta...v0.8.6-beta
-[0.8.5-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.8.4-beta...v0.8.5-beta
-[0.8.4-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.8.3-beta...v0.8.4-beta
-[0.8.3-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.8.2-beta...v0.8.3-beta
-[0.8.2-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.8.1-beta...v0.8.2-beta
-[0.8.1-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.8.0-beta...v0.8.1-beta
-[0.8.0-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.7.9-beta...v0.8.0-beta
-[0.7.9-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.7.8-beta...v0.7.9-beta
-[0.7.8-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.7.7-beta...v0.7.8-beta
-[0.7.7-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.7.6-beta...v0.7.7-beta
-[0.7.6-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.7.5-beta...v0.7.6-beta
-[0.7.5-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.7.4-beta...v0.7.5-beta
-[0.7.4-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.7.3-beta...v0.7.4-beta
-[0.7.3-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.7.2-beta...v0.7.3-beta
-[0.7.2-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.7.1-beta...v0.7.2-beta
-[0.7.1-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.7.0-beta...v0.7.1-beta
-[0.7.0-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.6.9-beta...v0.7.0-beta
-[0.6.9-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.6.8-beta...v0.6.9-beta
-[0.6.8-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.6.7-beta...v0.6.8-beta
-[0.6.7-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.6.6-beta...v0.6.7-beta
-[0.6.6-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.6.5-beta...v0.6.6-beta
-[0.6.5-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.6.4-beta...v0.6.5-beta
-[0.6.4-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.6.3-beta...v0.6.4-beta
-[0.6.3-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.6.2-beta...v0.6.3-beta
-[0.6.2-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.6.1-beta...v0.6.2-beta
-[0.6.1-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.6.0-beta...v0.6.1-beta
-[0.6.0-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.5.8-beta...v0.6.0-beta
-[0.5.8-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.5.7-beta...v0.5.8-beta
-[0.5.7-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.5.6-beta...v0.5.7-beta
-[0.5.6-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.5.5-beta...v0.5.6-beta
-[0.5.5-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.5.4-beta...v0.5.5-beta
-[0.5.4-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.5.3-beta...v0.5.4-beta
-[0.5.3-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.5.2-beta...v0.5.3-beta
-[0.5.2-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.5.1-beta...v0.5.2-beta
-[0.5.1-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.5.0-beta...v0.5.1-beta
-[0.5.0-beta]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.4.5-alpha...v0.5.0-beta
-[0.4.5-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.4.4-alpha...v0.4.5-alpha
-[0.4.4-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.4.3-alpha...v0.4.4-alpha
-[0.4.3-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.4.2-alpha...v0.4.3-alpha
-[0.4.2-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.4.1-alpha...v0.4.2-alpha
-[0.4.1-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.4.0-alpha...v0.4.1-alpha
-[0.4.0-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.3.8-alpha...v0.4.0-alpha
-[0.3.8-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.3.7-alpha...v0.3.8-alpha
-[0.3.7-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.3.6-alpha...v0.3.7-alpha
-[0.3.6-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.3.5-alpha...v0.3.6-alpha
-[0.3.5-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.3.4-alpha...v0.3.5-alpha
-[0.3.4-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.3.3-alpha...v0.3.4-alpha
-[0.3.3-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.3.2-alpha...v0.3.3-alpha
-[0.3.2-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.3.1-alpha...v0.3.2-alpha
-[0.3.1-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.3.0-alpha...v0.3.1-alpha
-[0.3.0-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.2.5-alpha...v0.3.0-alpha
-[0.2.5-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.2.4-alpha...v0.2.5-alpha
-[0.2.4-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.2.3-alpha...v0.2.4-alpha
-[0.2.3-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.2.2-alpha...v0.2.3-alpha
-[0.2.2-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.2.1-alpha...v0.2.2-alpha
-[0.2.1-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.2.0-alpha...v0.2.1-alpha
-[0.2.0-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.1.5-alpha...v0.2.0-alpha
-[0.1.5-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.1.4-alpha...v0.1.5-alpha
-[0.1.4-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.1.3-alpha...v0.1.4-alpha
-[0.1.3-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.1.2-alpha...v0.1.3-alpha
-[0.1.2-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.1.1-alpha...v0.1.2-alpha
-[0.1.1-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.1.0-alpha...v0.1.1-alpha
-[0.1.0-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.62-alpha...v0.1.0-alpha
-[0.0.62-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.61-alpha...v0.0.62-alpha
-[0.0.61-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.60-alpha...v0.0.61-alpha
-[0.0.60-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.59-alpha...v0.0.60-alpha
-[0.0.59-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.58-alpha...v0.0.59-alpha
-[0.0.58-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.57-alpha...v0.0.58-alpha
-[0.0.57-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.56-alpha...v0.0.57-alpha
-[0.0.56-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.55-alpha...v0.0.56-alpha
-[0.0.55-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.54-alpha...v0.0.55-alpha
-[0.0.54-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.53-alpha...v0.0.54-alpha
-[0.0.53-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.52-alpha...v0.0.53-alpha
-[0.0.52-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.51-alpha...v0.0.52-alpha
-[0.0.51-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.50-alpha...v0.0.51-alpha
-[0.0.50-alpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.49-prealpha...v0.0.50-alpha
-[0.0.49-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.48-prealpha...v0.0.49-prealpha
-[0.0.48-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.47-prealpha...v0.0.48-prealpha
-[0.0.47-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.46-prealpha...v0.0.47-prealpha
-[0.0.46-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.45-prealpha...v0.0.46-prealpha
-[0.0.45-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.44-prealpha...v0.0.45-prealpha
-[0.0.44-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.43-prealpha...v0.0.44-prealpha
-[0.0.43-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.42-prealpha...v0.0.43-prealpha
-[0.0.42-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.41-prealpha...v0.0.42-prealpha
-[0.0.41-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.40-prealpha...v0.0.41-prealpha
-[0.0.40-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.39-prealpha...v0.0.40-prealpha
-[0.0.39-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.38-prealpha...v0.0.39-prealpha
-[0.0.38-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.37-prealpha...v0.0.38-prealpha
-[0.0.37-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.36-prealpha...v0.0.37-prealpha
-[0.0.36-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.35-prealpha...v0.0.36-prealpha
-[0.0.35-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.34-prealpha...v0.0.35-prealpha
-[0.0.34-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.33-prealpha...v0.0.34-prealpha
-[0.0.33-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.32-prealpha...v0.0.33-prealpha
-[0.0.32-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.31-prealpha...v0.0.32-prealpha
-[0.0.31-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.29-prealpha...v0.0.31-prealpha
-[0.0.29-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.28-prealpha...v0.0.29-prealpha
-[0.0.28-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.27-prealpha...v0.0.28-prealpha
-[0.0.27-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.26-prealpha...v0.0.27-prealpha
-[0.0.26-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.25-prealpha...v0.0.26-prealpha
-[0.0.25-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.24-prealpha...v0.0.25-prealpha
-[0.0.24-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.23-prealpha...v0.0.24-prealpha
-[0.0.23-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.22-prealpha...v0.0.23-prealpha
-[0.0.22-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.21-prealpha...v0.0.22-prealpha
-[0.0.21-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.20-prealpha...v0.0.21-prealpha
-[0.0.20-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.19-prealpha...v0.0.20-prealpha
-[0.0.19-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.18-prealpha...v0.0.19-prealpha
-[0.0.18-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.17-prealpha...v0.0.18-prealpha
-[0.0.17-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.16-prealpha...v0.0.17-prealpha
-[0.0.16-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.15-prealpha...v0.0.16-prealpha
-[0.0.15-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.14-prealpha...v0.0.15-prealpha
-[0.0.14-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.13-prealpha...v0.0.14-prealpha
-[0.0.13-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.12-prealpha...v0.0.13-prealpha
-[0.0.12-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.11-prealpha...v0.0.12-prealpha
-[0.0.11-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.10-prealpha...v0.0.11-prealpha
-[0.0.10-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.9-prealpha...v0.0.10-prealpha
-[0.0.9-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.8-prealpha...v0.0.9-prealpha
-[0.0.8-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.7-prealpha...v0.0.8-prealpha
-[0.0.7-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.6-prealpha...v0.0.7-prealpha
-[0.0.6-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.5-prealpha...v0.0.6-prealpha
-[0.0.5-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.4-prealpha...v0.0.5-prealpha
-[0.0.4-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.3-prealpha...v0.0.4-prealpha
-[0.0.3-prealpha]: https://github.com/ErsatzTV/ErsatzTV/compare/v0.0.1-prealpha...v0.0.3-prealpha
-[0.0.1-prealpha]: https://github.com/ErsatzTV/ErsatzTV/releases/tag/v0.0.1-prealpha
+[Unreleased]: https://github.com/ErsatzTV/legacy/compare/v26.11.3...HEAD
+[26.11.3]: https://github.com/ErsatzTV/legacy/compare/v26.11.2...v26.11.3
+[26.11.2]: https://github.com/ErsatzTV/legacy/compare/v26.11.1...v26.11.2
+[26.11.1]: https://github.com/ErsatzTV/legacy/compare/v26.11.0...v26.11.1
+[26.11.0]: https://github.com/ErsatzTV/legacy/compare/v26.10.0...v26.11.0
+[26.10.0]: https://github.com/ErsatzTV/legacy/compare/v26.9.0...v26.10.0
+[26.9.0]: https://github.com/ErsatzTV/legacy/compare/v26.8.1...v26.9.0
+[26.8.1]: https://github.com/ErsatzTV/legacy/compare/v26.8.0...v26.8.1
+[26.8.0]: https://github.com/ErsatzTV/legacy/compare/v26.7.1...v26.8.0
+[26.7.1]: https://github.com/ErsatzTV/legacy/compare/v26.7.0...v26.7.1
+[26.7.0]: https://github.com/ErsatzTV/legacy/compare/v26.6.0...v26.7.0
+[26.6.0]: https://github.com/ErsatzTV/legacy/compare/v26.5.1...v26.6.0
+[26.5.1]: https://github.com/ErsatzTV/legacy/compare/v26.5.0...v26.5.1
+[26.5.0]: https://github.com/ErsatzTV/legacy/compare/v26.4.0...v26.5.0
+[26.4.0]: https://github.com/ErsatzTV/legacy/compare/v26.3.0...v26.4.0
+[26.3.0]: https://github.com/ErsatzTV/legacy/compare/v26.2.0...v26.3.0
+[26.2.0]: https://github.com/ErsatzTV/legacy/compare/v26.1.1...v26.2.0
+[26.1.1]: https://github.com/ErsatzTV/legacy/compare/v26.1.0...v26.1.1
+[26.1.0]: https://github.com/ErsatzTV/legacy/compare/v25.9.0...v26.1.0
+[25.9.0]: https://github.com/ErsatzTV/legacy/compare/v25.8.0...v25.9.0
+[25.8.0]: https://github.com/ErsatzTV/legacy/compare/v25.7.1...v25.8.0
+[25.7.1]: https://github.com/ErsatzTV/legacy/compare/v25.7.0...v25.7.1
+[25.7.0]: https://github.com/ErsatzTV/legacy/compare/v25.6.0...v25.7.0
+[25.6.0]: https://github.com/ErsatzTV/legacy/compare/v25.5.0...v25.6.0
+[25.5.0]: https://github.com/ErsatzTV/legacy/compare/v25.4.0...v25.5.0
+[25.4.0]: https://github.com/ErsatzTV/legacy/compare/v25.3.1...v25.4.0
+[25.3.1]: https://github.com/ErsatzTV/legacy/compare/v25.3.0...v25.3.1
+[25.3.0]: https://github.com/ErsatzTV/legacy/compare/v25.2.0...v25.3.0
+[25.2.0]: https://github.com/ErsatzTV/legacy/compare/v25.1.0...v25.2.0
+[25.1.0]: https://github.com/ErsatzTV/legacy/compare/v0.8.8-beta...v25.1.0
+[0.8.8-beta]: https://github.com/ErsatzTV/legacy/compare/v0.8.7-beta...v0.8.8-beta
+[0.8.7-beta]: https://github.com/ErsatzTV/legacy/compare/v0.8.6-beta...v0.8.7-beta
+[0.8.6-beta]: https://github.com/ErsatzTV/legacy/compare/v0.8.5-beta...v0.8.6-beta
+[0.8.5-beta]: https://github.com/ErsatzTV/legacy/compare/v0.8.4-beta...v0.8.5-beta
+[0.8.4-beta]: https://github.com/ErsatzTV/legacy/compare/v0.8.3-beta...v0.8.4-beta
+[0.8.3-beta]: https://github.com/ErsatzTV/legacy/compare/v0.8.2-beta...v0.8.3-beta
+[0.8.2-beta]: https://github.com/ErsatzTV/legacy/compare/v0.8.1-beta...v0.8.2-beta
+[0.8.1-beta]: https://github.com/ErsatzTV/legacy/compare/v0.8.0-beta...v0.8.1-beta
+[0.8.0-beta]: https://github.com/ErsatzTV/legacy/compare/v0.7.9-beta...v0.8.0-beta
+[0.7.9-beta]: https://github.com/ErsatzTV/legacy/compare/v0.7.8-beta...v0.7.9-beta
+[0.7.8-beta]: https://github.com/ErsatzTV/legacy/compare/v0.7.7-beta...v0.7.8-beta
+[0.7.7-beta]: https://github.com/ErsatzTV/legacy/compare/v0.7.6-beta...v0.7.7-beta
+[0.7.6-beta]: https://github.com/ErsatzTV/legacy/compare/v0.7.5-beta...v0.7.6-beta
+[0.7.5-beta]: https://github.com/ErsatzTV/legacy/compare/v0.7.4-beta...v0.7.5-beta
+[0.7.4-beta]: https://github.com/ErsatzTV/legacy/compare/v0.7.3-beta...v0.7.4-beta
+[0.7.3-beta]: https://github.com/ErsatzTV/legacy/compare/v0.7.2-beta...v0.7.3-beta
+[0.7.2-beta]: https://github.com/ErsatzTV/legacy/compare/v0.7.1-beta...v0.7.2-beta
+[0.7.1-beta]: https://github.com/ErsatzTV/legacy/compare/v0.7.0-beta...v0.7.1-beta
+[0.7.0-beta]: https://github.com/ErsatzTV/legacy/compare/v0.6.9-beta...v0.7.0-beta
+[0.6.9-beta]: https://github.com/ErsatzTV/legacy/compare/v0.6.8-beta...v0.6.9-beta
+[0.6.8-beta]: https://github.com/ErsatzTV/legacy/compare/v0.6.7-beta...v0.6.8-beta
+[0.6.7-beta]: https://github.com/ErsatzTV/legacy/compare/v0.6.6-beta...v0.6.7-beta
+[0.6.6-beta]: https://github.com/ErsatzTV/legacy/compare/v0.6.5-beta...v0.6.6-beta
+[0.6.5-beta]: https://github.com/ErsatzTV/legacy/compare/v0.6.4-beta...v0.6.5-beta
+[0.6.4-beta]: https://github.com/ErsatzTV/legacy/compare/v0.6.3-beta...v0.6.4-beta
+[0.6.3-beta]: https://github.com/ErsatzTV/legacy/compare/v0.6.2-beta...v0.6.3-beta
+[0.6.2-beta]: https://github.com/ErsatzTV/legacy/compare/v0.6.1-beta...v0.6.2-beta
+[0.6.1-beta]: https://github.com/ErsatzTV/legacy/compare/v0.6.0-beta...v0.6.1-beta
+[0.6.0-beta]: https://github.com/ErsatzTV/legacy/compare/v0.5.8-beta...v0.6.0-beta
+[0.5.8-beta]: https://github.com/ErsatzTV/legacy/compare/v0.5.7-beta...v0.5.8-beta
+[0.5.7-beta]: https://github.com/ErsatzTV/legacy/compare/v0.5.6-beta...v0.5.7-beta
+[0.5.6-beta]: https://github.com/ErsatzTV/legacy/compare/v0.5.5-beta...v0.5.6-beta
+[0.5.5-beta]: https://github.com/ErsatzTV/legacy/compare/v0.5.4-beta...v0.5.5-beta
+[0.5.4-beta]: https://github.com/ErsatzTV/legacy/compare/v0.5.3-beta...v0.5.4-beta
+[0.5.3-beta]: https://github.com/ErsatzTV/legacy/compare/v0.5.2-beta...v0.5.3-beta
+[0.5.2-beta]: https://github.com/ErsatzTV/legacy/compare/v0.5.1-beta...v0.5.2-beta
+[0.5.1-beta]: https://github.com/ErsatzTV/legacy/compare/v0.5.0-beta...v0.5.1-beta
+[0.5.0-beta]: https://github.com/ErsatzTV/legacy/compare/v0.4.5-alpha...v0.5.0-beta
+[0.4.5-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.4.4-alpha...v0.4.5-alpha
+[0.4.4-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.4.3-alpha...v0.4.4-alpha
+[0.4.3-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.4.2-alpha...v0.4.3-alpha
+[0.4.2-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.4.1-alpha...v0.4.2-alpha
+[0.4.1-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.4.0-alpha...v0.4.1-alpha
+[0.4.0-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.3.8-alpha...v0.4.0-alpha
+[0.3.8-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.3.7-alpha...v0.3.8-alpha
+[0.3.7-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.3.6-alpha...v0.3.7-alpha
+[0.3.6-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.3.5-alpha...v0.3.6-alpha
+[0.3.5-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.3.4-alpha...v0.3.5-alpha
+[0.3.4-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.3.3-alpha...v0.3.4-alpha
+[0.3.3-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.3.2-alpha...v0.3.3-alpha
+[0.3.2-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.3.1-alpha...v0.3.2-alpha
+[0.3.1-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.3.0-alpha...v0.3.1-alpha
+[0.3.0-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.2.5-alpha...v0.3.0-alpha
+[0.2.5-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.2.4-alpha...v0.2.5-alpha
+[0.2.4-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.2.3-alpha...v0.2.4-alpha
+[0.2.3-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.2.2-alpha...v0.2.3-alpha
+[0.2.2-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.2.1-alpha...v0.2.2-alpha
+[0.2.1-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.2.0-alpha...v0.2.1-alpha
+[0.2.0-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.1.5-alpha...v0.2.0-alpha
+[0.1.5-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.1.4-alpha...v0.1.5-alpha
+[0.1.4-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.1.3-alpha...v0.1.4-alpha
+[0.1.3-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.1.2-alpha...v0.1.3-alpha
+[0.1.2-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.1.1-alpha...v0.1.2-alpha
+[0.1.1-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.1.0-alpha...v0.1.1-alpha
+[0.1.0-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.62-alpha...v0.1.0-alpha
+[0.0.62-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.61-alpha...v0.0.62-alpha
+[0.0.61-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.60-alpha...v0.0.61-alpha
+[0.0.60-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.59-alpha...v0.0.60-alpha
+[0.0.59-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.58-alpha...v0.0.59-alpha
+[0.0.58-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.57-alpha...v0.0.58-alpha
+[0.0.57-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.56-alpha...v0.0.57-alpha
+[0.0.56-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.55-alpha...v0.0.56-alpha
+[0.0.55-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.54-alpha...v0.0.55-alpha
+[0.0.54-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.53-alpha...v0.0.54-alpha
+[0.0.53-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.52-alpha...v0.0.53-alpha
+[0.0.52-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.51-alpha...v0.0.52-alpha
+[0.0.51-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.50-alpha...v0.0.51-alpha
+[0.0.50-alpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.49-prealpha...v0.0.50-alpha
+[0.0.49-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.48-prealpha...v0.0.49-prealpha
+[0.0.48-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.47-prealpha...v0.0.48-prealpha
+[0.0.47-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.46-prealpha...v0.0.47-prealpha
+[0.0.46-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.45-prealpha...v0.0.46-prealpha
+[0.0.45-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.44-prealpha...v0.0.45-prealpha
+[0.0.44-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.43-prealpha...v0.0.44-prealpha
+[0.0.43-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.42-prealpha...v0.0.43-prealpha
+[0.0.42-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.41-prealpha...v0.0.42-prealpha
+[0.0.41-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.40-prealpha...v0.0.41-prealpha
+[0.0.40-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.39-prealpha...v0.0.40-prealpha
+[0.0.39-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.38-prealpha...v0.0.39-prealpha
+[0.0.38-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.37-prealpha...v0.0.38-prealpha
+[0.0.37-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.36-prealpha...v0.0.37-prealpha
+[0.0.36-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.35-prealpha...v0.0.36-prealpha
+[0.0.35-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.34-prealpha...v0.0.35-prealpha
+[0.0.34-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.33-prealpha...v0.0.34-prealpha
+[0.0.33-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.32-prealpha...v0.0.33-prealpha
+[0.0.32-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.31-prealpha...v0.0.32-prealpha
+[0.0.31-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.29-prealpha...v0.0.31-prealpha
+[0.0.29-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.28-prealpha...v0.0.29-prealpha
+[0.0.28-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.27-prealpha...v0.0.28-prealpha
+[0.0.27-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.26-prealpha...v0.0.27-prealpha
+[0.0.26-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.25-prealpha...v0.0.26-prealpha
+[0.0.25-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.24-prealpha...v0.0.25-prealpha
+[0.0.24-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.23-prealpha...v0.0.24-prealpha
+[0.0.23-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.22-prealpha...v0.0.23-prealpha
+[0.0.22-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.21-prealpha...v0.0.22-prealpha
+[0.0.21-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.20-prealpha...v0.0.21-prealpha
+[0.0.20-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.19-prealpha...v0.0.20-prealpha
+[0.0.19-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.18-prealpha...v0.0.19-prealpha
+[0.0.18-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.17-prealpha...v0.0.18-prealpha
+[0.0.17-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.16-prealpha...v0.0.17-prealpha
+[0.0.16-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.15-prealpha...v0.0.16-prealpha
+[0.0.15-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.14-prealpha...v0.0.15-prealpha
+[0.0.14-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.13-prealpha...v0.0.14-prealpha
+[0.0.13-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.12-prealpha...v0.0.13-prealpha
+[0.0.12-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.11-prealpha...v0.0.12-prealpha
+[0.0.11-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.10-prealpha...v0.0.11-prealpha
+[0.0.10-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.9-prealpha...v0.0.10-prealpha
+[0.0.9-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.8-prealpha...v0.0.9-prealpha
+[0.0.8-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.7-prealpha...v0.0.8-prealpha
+[0.0.7-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.6-prealpha...v0.0.7-prealpha
+[0.0.6-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.5-prealpha...v0.0.6-prealpha
+[0.0.5-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.4-prealpha...v0.0.5-prealpha
+[0.0.4-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.3-prealpha...v0.0.4-prealpha
+[0.0.3-prealpha]: https://github.com/ErsatzTV/legacy/compare/v0.0.1-prealpha...v0.0.3-prealpha
+[0.0.1-prealpha]: https://github.com/ErsatzTV/legacy/releases/tag/v0.0.1-prealpha

@@ -8,6 +8,7 @@ using ErsatzTV.Core.Interfaces.Metadata;
 using ErsatzTV.Core.Interfaces.Plex;
 using ErsatzTV.Core.Interfaces.Streaming;
 using ErsatzTV.Core.Plex;
+using ErsatzTV.Core.Security;
 using ErsatzTV.Core.Streaming;
 using ErsatzTV.Infrastructure.Data;
 using ErsatzTV.Infrastructure.Extensions;
@@ -92,12 +93,21 @@ public class ExternalJsonPlayoutItemProvider : IExternalJsonPlayoutItemProvider
         // must deserialize channel from json
         foreach (ExternalJsonChannel channel in maybeChannel)
         {
-            // TODO: null start time should log and throw
+            if (!DateTimeOffset.TryParse(
+                    channel.StartTime,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal,
+                    out DateTimeOffset parsed))
+            {
+                _logger.LogError(
+                    "External json channel in file {ScheduleFile} has an invalid start time {StartTime}",
+                    playout.ScheduleFile,
+                    channel.StartTime);
 
-            DateTimeOffset startTime = DateTimeOffset.Parse(
-                channel.StartTime ?? string.Empty,
-                CultureInfo.InvariantCulture,
-                DateTimeStyles.AssumeUniversal).ToLocalTime();
+                return new UnableToLocatePlayoutItem();
+            }
+
+            DateTimeOffset startTime = parsed.ToLocalTime();
 
             //_logger.LogDebug("external json start time: {StartTime}", startTime);
 
@@ -207,13 +217,34 @@ public class ExternalJsonPlayoutItemProvider : IExternalJsonPlayoutItemProvider
             .Include(pms => pms.Connections)
             .SelectOneAsync(pms => pms.ServerName, pms => pms.ServerName == program.ServerKey, cancellationToken);
 
+        if (maybeServer.IsNone)
+        {
+            _logger.LogWarning(
+                "Unable to stream remotely; no Plex server found with server name {ServerName}",
+                program.ServerKey);
+        }
+
         foreach (PlexMediaSource server in maybeServer)
         {
             Option<PlexConnection> maybeConnection = server.Connections.SingleOrDefault(c => c.IsActive);
+            if (maybeConnection.IsNone)
+            {
+                _logger.LogWarning(
+                    "Unable to stream remotely; Plex server {ServerName} has no active connection",
+                    server.ServerName);
+            }
+
             foreach (PlexConnection connection in maybeConnection)
             {
                 Option<PlexServerAuthToken> maybeToken =
                     await _plexSecretStore.GetServerAuthToken(server.ClientIdentifier);
+
+                if (maybeToken.IsNone)
+                {
+                    _logger.LogWarning(
+                        "Unable to stream remotely; Plex server {ServerName} has no auth token",
+                        server.ServerName);
+                }
 
                 foreach (PlexServerAuthToken token in maybeToken)
                 {
@@ -223,14 +254,23 @@ public class ExternalJsonPlayoutItemProvider : IExternalJsonPlayoutItemProvider
                         _ => await GetPlexMovie(server, connection, token, program)
                     };
 
+                    PlayoutItem playoutItem = GetPlayoutItem(startTime, mediaItem, program);
+
+                    DateTimeOffset exp = playoutItem.FinishOffset + TimeSpan.FromHours(2);
+
+                    string sig = InternalUrlSigner.Sign(
+                        exp,
+                        "plex",
+                        $"{server.Id}",
+                        $"{program.PlexFile}");
+
                     return new PlayoutItemWithPath(
-                        GetPlayoutItem(startTime, mediaItem, program),
-                        $"http://localhost:{Settings.StreamingPort}/media/plex/{server.Id}/{program.PlexFile}");
+                        playoutItem,
+                        $"http://localhost:{Settings.StreamingPort}/internal/media/plex/{server.Id}/{program.PlexFile}?exp={exp.ToUnixTimeSeconds()}&sig={sig}");
                 }
             }
         }
 
-        // TODO: log errors?
         return new UnableToLocatePlayoutItem();
     }
 

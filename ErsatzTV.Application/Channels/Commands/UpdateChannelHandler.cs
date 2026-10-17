@@ -1,6 +1,7 @@
 ﻿using System.Globalization;
 using System.Text.RegularExpressions;
 using System.Threading.Channels;
+using ErsatzTV.Application.Playouts;
 using ErsatzTV.Application.Subtitles;
 using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
@@ -45,6 +46,13 @@ public class UpdateChannelHandler(
         }
 
         bool hasEpgChange = c.PlayoutSource != update.PlayoutSource || c.ShowInEpg != update.ShowInEpg;
+        bool hasPlayoutChange = hasEpgChange || c.WatermarkId != update.WatermarkId ||
+                                c.FFmpegProfileId != update.FFmpegProfileId ||
+                                c.PreferredAudioLanguageCode != update.PreferredAudioLanguageCode ||
+                                c.PreferredAudioTitle != update.PreferredAudioTitle ||
+                                c.PreferredSubtitleLanguageCode != update.PreferredSubtitleLanguageCode ||
+                                c.MusicVideoCreditsMode != update.MusicVideoCreditsMode ||
+                                c.SubtitleMode != update.SubtitleMode;
 
         c.Name = update.Name;
         c.Number = update.Number;
@@ -131,9 +139,18 @@ public class UpdateChannelHandler(
 
         c.MirrorSourceChannelId = update.MirrorSourceChannelId;
         c.PlayoutOffset = update.PlayoutOffset;
+        c.StreamingEngine = update.StreamingEngine;
+        c.NextEngineTextSubtitleMode = update.NextEngineTextSubtitleMode;
         c.StreamingMode = update.StreamingMode;
         c.WatermarkId = update.WatermarkId;
         c.FallbackFillerId = update.FallbackFillerId;
+
+        if (c.StreamingEngine is StreamingEngine.Next &&
+            c.StreamingMode is not StreamingMode.HttpLiveStreamingSegmenter &&
+            c.StreamingMode is not StreamingMode.TransportStreamHybrid)
+        {
+            c.StreamingMode = StreamingMode.HttpLiveStreamingSegmenter;
+        }
 
         await dbContext.SaveChangesAsync(cancellationToken);
 
@@ -154,6 +171,10 @@ public class UpdateChannelHandler(
         if (hasEpgChange)
         {
             await workerChannel.WriteAsync(new RefreshChannelData(c.Number), cancellationToken);
+        }
+        if (hasPlayoutChange)
+        {
+            await workerChannel.WriteAsync(new SyncNextPlayout(c.Number), cancellationToken);
         }
 
         return ProjectToViewModel(c, c.Playouts?.Count ?? 0);

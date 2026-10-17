@@ -1,4 +1,4 @@
-﻿namespace ErsatzTV.Infrastructure.GitHub.Models;
+namespace ErsatzTV.Infrastructure.GitHub.Models;
 
 public class GitHubTag
 {

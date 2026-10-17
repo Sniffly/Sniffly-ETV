@@ -118,8 +118,8 @@ public class OtherVideoRepository : IOtherVideoRepository
     {
         await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync();
         return await dbContext.Connection.ExecuteAsync(
-            "INSERT INTO Tag (Name, OtherVideoMetadataId, ExternalCollectionId) VALUES (@Name, @MetadataId, @ExternalCollectionId)",
-            new { tag.Name, MetadataId = metadata.Id, tag.ExternalCollectionId }).Map(result => result > 0);
+            "INSERT INTO Tag (Name, OtherVideoMetadataId, ExternalCollectionId, ExternalTypeId) VALUES (@Name, @MetadataId, @ExternalCollectionId, @ExternalTypeId)",
+            new { tag.Name, MetadataId = metadata.Id, tag.ExternalCollectionId, tag.ExternalTypeId }).Map(result => result > 0);
     }
 
     public async Task<bool> AddStudio(OtherVideoMetadata metadata, Studio studio)
@@ -173,6 +173,14 @@ public class OtherVideoRepository : IOtherVideoRepository
         return await dbContext.Connection.ExecuteAsync(
             "INSERT INTO Writer (Name, OtherVideoMetadataId) VALUES (@Name, @MetadataId)",
             new { writer.Name, MetadataId = metadata.Id }).Map(result => result > 0);
+    }
+
+    public async Task<bool> UpdateTitles(OtherVideoMetadata metadata, string title, string sortTitle)
+    {
+        await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync();
+        return await dbContext.Connection.ExecuteAsync(
+            "UPDATE OtherVideoMetadata SET Title = @Title, SortTitle = @SortTitle WHERE Id = @Id",
+            new { Title = title, SortTitle = sortTitle, metadata.Id }).Map(result => result > 0);
     }
 
     private async Task<Either<BaseError, MediaItemScanResult<OtherVideo>>> AddOtherVideo(

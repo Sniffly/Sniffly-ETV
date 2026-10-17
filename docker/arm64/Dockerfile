@@ -1,6 +1,6 @@
 ﻿FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble-arm64v8 AS dotnet-runtime
 
-FROM --platform=linux/arm64 ghcr.io/ersatztv/ersatztv-ffmpeg:7.1.1 AS runtime-base
+FROM ghcr.io/ersatztv/ersatztv-ffmpeg:8.1.2-4@sha256:ab7e476274568401238939835a2e4d98b07a8ab21c0759997743fbba85b50de7 AS runtime-base
 COPY --from=dotnet-runtime /usr/share/dotnet /usr/share/dotnet
 
 # https://hub.docker.com/_/microsoft-dotnet
@@ -46,6 +46,7 @@ ENV FONTCONFIG_PATH=/etc/fonts
 RUN fc-cache update
 WORKDIR /app
 COPY --from=build /app ./
+COPY ersatztv-channel ./
 ENV ETV_CONFIG_FOLDER=/config
 ENV ETV_TRANSCODE_FOLDER=/transcode
 ENTRYPOINT ["./ErsatzTV"]

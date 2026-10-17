@@ -10,6 +10,7 @@ using ErsatzTV.Core.Interfaces.Metadata;
 using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.Core.Iptv;
 using ErsatzTV.Core.Jellyfin;
+using ErsatzTV.Core.Plex;
 using ErsatzTV.Core.Streaming;
 using ErsatzTV.Infrastructure.Data;
 using ErsatzTV.Infrastructure.Extensions;
@@ -215,6 +216,18 @@ public class RefreshChannelDataHandler : IRequestHandler<RefreshChannelData>
                 .AsSplitQuery()
                 .ToListAsync(cancellationToken);
 
+            // apply playout offset to all items consistently
+            foreach (Playout playout in playouts)
+            {
+                foreach (PlayoutItem item in playout.Items)
+                {
+                    item.Start += playoutOffset;
+                    item.GuideStart += playoutOffset;
+                    item.Finish += playoutOffset;
+                    item.GuideFinish += playoutOffset;
+                }
+            }
+
             await using RecyclableMemoryStream ms = _recyclableMemoryStreamManager.GetStream();
             await using var xml = XmlWriter.Create(
                 ms,
@@ -238,11 +251,6 @@ public class RefreshChannelDataHandler : IRequestHandler<RefreshChannelData>
                             .OrderBy(pi => pi.Start)
                             .Filter(pi => pi.StartOffset <= finish)
                             .ToList();
-                        foreach (var item in floodSorted)
-                        {
-                            item.Start += playoutOffset;
-                            item.Finish += playoutOffset;
-                        }
 
                         await WritePlayoutXml(
                             request,
@@ -264,11 +272,6 @@ public class RefreshChannelDataHandler : IRequestHandler<RefreshChannelData>
                             .OrderBy(pi => pi.Start)
                             .Filter(pi => pi.StartOffset <= finish)
                             .ToList();
-                        foreach (var item in blockSorted)
-                        {
-                            item.Start += playoutOffset;
-                            item.Finish += playoutOffset;
-                        }
 
                         await WriteBlockPlayoutXml(
                             request,
@@ -288,11 +291,6 @@ public class RefreshChannelDataHandler : IRequestHandler<RefreshChannelData>
                         var externalJsonSorted = (await CollectExternalJsonItems(playout.ScheduleFile))
                             .Filter(pi => pi.StartOffset <= finish)
                             .ToList();
-                        foreach (var item in externalJsonSorted)
-                        {
-                            item.Start += playoutOffset;
-                            item.Finish += playoutOffset;
-                        }
 
                         await WritePlayoutXml(
                             request,
@@ -1095,13 +1093,17 @@ public class RefreshChannelDataHandler : IRequestHandler<RefreshChannelData>
             return artworkPath;
         }
 
-        if (artworkPath.StartsWith("jellyfin://", StringComparison.OrdinalIgnoreCase))
+        if (artworkPath.StartsWith("plex/", StringComparison.OrdinalIgnoreCase))
         {
-            artworkPath = JellyfinUrl.PlaceholderProxyForArtwork(artworkPath, artworkKind, height);
+            artworkPath = PlexUrl.PlaceholderProxyForArtwork(artwork.Id, artworkKind);
+        }
+        else if (artworkPath.StartsWith("jellyfin://", StringComparison.OrdinalIgnoreCase))
+        {
+            artworkPath = JellyfinUrl.PlaceholderProxyForArtwork(artwork.Id, artworkKind);
         }
         else if (artworkPath.StartsWith("emby://", StringComparison.OrdinalIgnoreCase))
         {
-            artworkPath = EmbyUrl.PlaceholderProxyForArtwork(artworkPath, artworkKind, height);
+            artworkPath = EmbyUrl.PlaceholderProxyForArtwork(artwork.Id, artworkKind);
         }
         else
         {
@@ -1192,12 +1194,17 @@ public class RefreshChannelDataHandler : IRequestHandler<RefreshChannelData>
             // must deserialize channel from json
             foreach (ExternalJsonChannel channel in maybeChannel)
             {
-                // TODO: null start time should log and throw
+                if (!DateTimeOffset.TryParse(
+                        channel.StartTime,
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.AssumeUniversal,
+                        out DateTimeOffset parsed))
+                {
+                    throw new InvalidOperationException(
+                        $"External json channel in file {path} has an invalid start time '{channel.StartTime}'");
+                }
 
-                DateTimeOffset startTime = DateTimeOffset.Parse(
-                    channel.StartTime ?? string.Empty,
-                    CultureInfo.InvariantCulture,
-                    DateTimeStyles.AssumeUniversal).ToLocalTime();
+                DateTimeOffset startTime = parsed.ToLocalTime();
 
                 for (var i = 0; i < channel.Programs.Length; i++)
                 {

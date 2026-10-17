@@ -1,4 +1,6 @@
-﻿using ErsatzTV.Core;
+﻿using System.Threading.Channels;
+using ErsatzTV.Application.Playouts;
+using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.FFmpeg;
 using ErsatzTV.Core.Interfaces.Search;
@@ -9,7 +11,10 @@ using Microsoft.EntityFrameworkCore;
 
 namespace ErsatzTV.Application.FFmpegProfiles;
 
-public class UpdateFFmpegProfileHandler(IDbContextFactory<TvContext> dbContextFactory, ISearchTargets searchTargets)
+public class UpdateFFmpegProfileHandler(
+    ChannelWriter<IBackgroundServiceRequest> workerChannel,
+    IDbContextFactory<TvContext> dbContextFactory,
+    ISearchTargets searchTargets)
     : IRequestHandler<UpdateFFmpegProfile, Either<BaseError, UpdateFFmpegProfileResult>>
 {
     public async Task<Either<BaseError, UpdateFFmpegProfileResult>> Handle(
@@ -27,6 +32,9 @@ public class UpdateFFmpegProfileHandler(IDbContextFactory<TvContext> dbContextFa
         UpdateFFmpegProfile update,
         CancellationToken cancellationToken)
     {
+        // next playouts carry graphics, which depend on video copy and the canvas resolution
+        var nextPlayoutSettings = (p.VideoFormat is FFmpegProfileVideoFormat.Copy, p.ResolutionId);
+
         var hwAccel = update.NormalizeVideo
             ? update.HardwareAcceleration
             : HardwareAccelerationKind.None;
@@ -53,9 +61,8 @@ public class UpdateFFmpegProfileHandler(IDbContextFactory<TvContext> dbContextFa
             ? FFmpegProfileBitDepth.EightBit
             : update.BitDepth;
 
-        if (p.HardwareAcceleration is not (HardwareAccelerationKind.Nvenc or HardwareAccelerationKind.Vaapi
-                or HardwareAccelerationKind.Qsv) &&
-            p.VideoFormat is FFmpegProfileVideoFormat.Av1)
+        // av1 encoding requires fmp4 segments, which are no longer produced
+        if (p.VideoFormat is FFmpegProfileVideoFormat.Av1)
         {
             p.VideoFormat = FFmpegProfileVideoFormat.Hevc;
         }
@@ -103,6 +110,20 @@ public class UpdateFFmpegProfileHandler(IDbContextFactory<TvContext> dbContextFa
 
         searchTargets.SearchTargetsChanged();
 
+        if (nextPlayoutSettings != (p.VideoFormat is FFmpegProfileVideoFormat.Copy, p.ResolutionId))
+        {
+            List<string> channelNumbers = await dbContext.Channels
+                .AsNoTracking()
+                .Where(c => c.FFmpegProfileId == p.Id)
+                .Select(c => c.Number)
+                .ToListAsync(cancellationToken);
+
+            foreach (string channelNumber in channelNumbers)
+            {
+                await workerChannel.WriteAsync(new SyncNextPlayout(channelNumber), cancellationToken);
+            }
+        }
+
         return new UpdateFFmpegProfileResult(p.Id);
     }
 
@@ -122,7 +143,7 @@ public class UpdateFFmpegProfileHandler(IDbContextFactory<TvContext> dbContextFa
         CancellationToken cancellationToken) =>
         dbContext.FFmpegProfiles
             .SelectOneAsync(p => p.Id, p => p.Id == updateFFmpegProfile.FFmpegProfileId, cancellationToken)
-            .Map(o => o.ToValidation<BaseError>("FFmpegProfile does not exist."));
+            .Map(o => o.ToValidation(BaseError.NotFound("FFmpegProfile does not exist.")));
 
     private static async Task<Validation<BaseError, string>> ValidateName(
         TvContext dbContext,
@@ -130,7 +151,7 @@ public class UpdateFFmpegProfileHandler(IDbContextFactory<TvContext> dbContextFa
     {
         if (updateFFmpegProfile.Name.Length > 50)
         {
-            return BaseError.New($"FFmpeg profile name \"{updateFFmpegProfile.Name}\" is invalid");
+            return BaseError.BadRequest($"FFmpeg profile name \"{updateFFmpegProfile.Name}\" is invalid");
         }
 
         Option<FFmpegProfile> maybeExisting = await dbContext.FFmpegProfiles
@@ -140,7 +161,7 @@ public class UpdateFFmpegProfileHandler(IDbContextFactory<TvContext> dbContextFa
             .Map(Optional);
 
         return maybeExisting.IsSome
-            ? BaseError.New($"An ffmpeg profile named \"{updateFFmpegProfile.Name}\" already exists in the database")
+            ? BaseError.Conflict($"An ffmpeg profile named \"{updateFFmpegProfile.Name}\" already exists in the database")
             : Success<BaseError, string>(updateFFmpegProfile.Name);
     }
 
@@ -154,5 +175,6 @@ public class UpdateFFmpegProfileHandler(IDbContextFactory<TvContext> dbContextFa
         dbContext.Resolutions
             .SelectOneAsync(r => r.Id, r => r.Id == updateFFmpegProfile.ResolutionId, cancellationToken)
             .MapT(r => r.Id)
-            .Map(o => o.ToValidation<BaseError>($"[Resolution] {updateFFmpegProfile.ResolutionId} does not exist"));
+            .Map(o => o.ToValidation(
+                BaseError.BadRequest($"[Resolution] {updateFFmpegProfile.ResolutionId} does not exist")));
 }

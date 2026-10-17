@@ -2,6 +2,7 @@ using Dapper;
 using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Jellyfin;
+using ErsatzTV.Core.Security;
 using ErsatzTV.Infrastructure.Data;
 using ErsatzTV.Infrastructure.Extensions;
 using Microsoft.EntityFrameworkCore;
@@ -81,11 +82,34 @@ public class GetSubtitlePathByIdHandler(IDbContextFactory<TvContext> dbContextFa
                 .Map(Optional);
         }
 
+        // check for plex other video
+        if (maybePlexId.IsNone)
+        {
+            maybePlexId = await dbContext.Connection.QuerySingleOrDefaultAsync<int?>(
+                    @"select PMS.Id from PlexMediaSource PMS
+                     inner join Library L on PMS.Id = L.MediaSourceId
+                     inner join LibraryPath LP on L.Id = LP.LibraryId
+                     inner join MediaItem MI on LP.Id = MI.LibraryPathId
+                     inner join OtherVideoMetadata OVM on OVM.OtherVideoId = MI.Id
+                     inner join Subtitle S on OVM.Id = S.OtherVideoMetadataId
+                     where S.Id = @SubtitleId",
+                    new { SubtitleId = subtitleId })
+                .Map(Optional);
+        }
+
         foreach (int plexMediaSourceId in maybePlexId)
         {
             foreach (string subtitlePath in maybeSubtitle.Map(s => s.Path))
             {
-                return $"http://localhost:{Settings.StreamingPort}/media/plex/{plexMediaSourceId}/{subtitlePath}";
+                DateTimeOffset exp = DateTimeOffset.Now + TimeSpan.FromHours(1);
+
+                string sig = InternalUrlSigner.Sign(
+                    exp,
+                    "plex",
+                    $"{plexMediaSourceId}",
+                    subtitlePath);
+
+                return $"http://localhost:{Settings.StreamingPort}/internal/media/plex/{plexMediaSourceId}/{subtitlePath}?exp={exp.ToUnixTimeSeconds()}&sig={sig}";
             }
         }
 
@@ -126,7 +150,12 @@ public class GetSubtitlePathByIdHandler(IDbContextFactory<TvContext> dbContextFa
                 string extension = Subtitle.ExtensionForCodec(subtitle.Codec);
                 var subtitlePath =
                     $"Videos/{jellyfinItemId}/{jellyfinItemId}/Subtitles/{index}/{index}/Stream.{extension}";
-                return $"http://localhost:{Settings.StreamingPort}/media/jellyfin/{subtitlePath}";
+
+                DateTimeOffset exp = DateTimeOffset.Now + TimeSpan.FromHours(1);
+
+                string sig = InternalUrlSigner.Sign(exp, "jellyfin", subtitlePath);
+
+                return $"http://localhost:{Settings.StreamingPort}/internal/media/jellyfin/{subtitlePath}?exp={exp.ToUnixTimeSeconds()}&sig={sig}";
             }
         }
 
@@ -166,7 +195,12 @@ public class GetSubtitlePathByIdHandler(IDbContextFactory<TvContext> dbContextFa
                 string extension = Subtitle.ExtensionForCodec(subtitle.Codec);
                 var subtitlePath =
                     $"Videos/{embyItemId}/{subtitle.Path}/Subtitles/{subtitle.StreamIndex}/Stream.{extension}";
-                return $"http://localhost:{Settings.StreamingPort}/media/emby/{subtitlePath}";
+
+                DateTimeOffset exp = DateTimeOffset.Now + TimeSpan.FromHours(1);
+
+                string sig = InternalUrlSigner.Sign(exp, "emby", subtitlePath);
+
+                return $"http://localhost:{Settings.StreamingPort}/internal/media/emby/{subtitlePath}?exp={exp.ToUnixTimeSeconds()}&sig={sig}";
             }
         }
 

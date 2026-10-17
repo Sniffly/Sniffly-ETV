@@ -30,6 +30,7 @@ public class PlayoutTimeShifter(
             Option<Playout> maybePlayout = await dbContext.Playouts
                 .Include(p => p.Channel)
                 .Include(p => p.Items)
+                .Include(p => p.Gaps)
                 .Include(p => p.Anchor)
                 .Include(p => p.ProgramScheduleAnchors)
                 .Include(p => p.PlayoutHistory)
@@ -72,6 +73,23 @@ public class PlayoutTimeShifter(
                     playout.OnDemandCheckpoint = playout.Items.Min(p => p.StartOffset);
                 }
 
+                // remove items that have finished before the checkpoint
+                foreach (DateTimeOffset checkpoint in Optional(playout.OnDemandCheckpoint))
+                {
+                    DateTime checkpointUtc = checkpoint.UtcDateTime;
+                    int removed = playout.Items.RemoveAll(i => i.Finish < checkpointUtc);
+                    if (removed > 0)
+                    {
+                        logger.LogDebug(
+                            "Removing {Count} played items before shifting playout for channel {Number} - {Name}",
+                            removed,
+                            playout.Channel.Number,
+                            playout.Channel.Name);
+                    }
+
+                    playout.Gaps.RemoveAll(g => g.Finish < checkpointUtc);
+                }
+
                 TimeSpan toOffset = now - playout.OnDemandCheckpoint.IfNone(now);
 
                 logger.LogDebug(
@@ -102,6 +120,13 @@ public class PlayoutTimeShifter(
                     {
                         playoutItem.GuideFinish += toOffset;
                     }
+                }
+
+                // time shift gaps along with the items they were calculated from
+                foreach (PlayoutGap gap in playout.Gaps)
+                {
+                    gap.Start += toOffset;
+                    gap.Finish += toOffset;
                 }
 
                 // time shift anchors

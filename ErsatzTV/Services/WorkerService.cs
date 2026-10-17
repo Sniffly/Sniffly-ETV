@@ -81,11 +81,11 @@ public class WorkerService : BackgroundService
                                     error.Value));
                             break;
                         }
+                        case SyncNextPlayout syncNextPlayout:
+                            await mediator.Send(syncNextPlayout, stoppingToken);
+                            break;
                         case CheckForOverlappingPlayoutItems checkForOverlappingPlayoutItems:
                             await mediator.Send(checkForOverlappingPlayoutItems, stoppingToken);
-                            break;
-                        case InsertPlayoutGaps insertPlayoutGaps:
-                            await mediator.Send(insertPlayoutGaps, stoppingToken);
                             break;
                         case TimeShiftOnDemandPlayout timeShiftOnDemandPlayout:
                             await mediator.Send(timeShiftOnDemandPlayout, stoppingToken);

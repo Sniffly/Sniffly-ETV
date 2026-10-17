@@ -11,15 +11,23 @@ using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Extensions;
 using ErsatzTV.Core.Interfaces.Metadata;
 using ErsatzTV.Core.Interfaces.Repositories;
+using ErsatzTV.Core.Security;
+using ErsatzTV.FFmpeg;
 using ErsatzTV.FFmpeg.Capabilities;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using File = TagLib.File;
+using MediaStream = ErsatzTV.Core.Domain.MediaStream;
 
 namespace ErsatzTV.Infrastructure.Metadata;
 
 public partial class LocalStatisticsProvider : ILocalStatisticsProvider
 {
+    private const string DolbyVisionSideData = "DOVI configuration record";
+
+    private static readonly List<string> Hdr10SideData = ["Mastering display metadata", "Content light level metadata"];
+
     private readonly IHardwareCapabilitiesFactory _hardwareCapabilitiesFactory;
     private readonly ILocalFileSystem _localFileSystem;
     private readonly ILogger<LocalStatisticsProvider> _logger;
@@ -43,9 +51,24 @@ public partial class LocalStatisticsProvider : ILocalStatisticsProvider
     public async Task<Either<BaseError, MediaVersion>> GetStatistics(string ffprobePath, string path)
     {
         Either<BaseError, FFprobe> maybeProbe = await GetProbeOutput(ffprobePath, path);
-        return maybeProbe.Match(
-            ffprobe => ProjectToMediaVersion(path, ffprobe),
-            Left<BaseError, MediaVersion>);
+        return await maybeProbe.Match(
+            async ffprobe =>
+            {
+                MediaVersion version = ProjectToMediaVersion(path, ffprobe);
+                foreach (MediaStream stream in version.Streams.Where(s => s.MediaStreamKind is MediaStreamKind.Video))
+                {
+                    if (IsPq(stream) && !stream.HasHdr10Metadata)
+                    {
+                        Either<BaseError, bool> probeResult =
+                            await ProbeFrameForHdr10Metadata(ffprobePath, path, stream.Index);
+
+                        stream.HasHdr10Metadata = probeResult.IsRight && probeResult.RightToSeq().All(identity);
+                    }
+                }
+
+                return Right<BaseError, MediaVersion>(version);
+            },
+            error => Task.FromResult(Left<BaseError, MediaVersion>(error)));
     }
 
     public async Task<Either<BaseError, bool>> RefreshStatistics(
@@ -211,6 +234,20 @@ public partial class LocalStatisticsProvider : ILocalStatisticsProvider
                         await AnalyzeDuration(ffmpegPath, mediaItemPath, version);
                     }
 
+                    foreach (MediaStream stream in
+                             version.Streams.Where(s => s.MediaStreamKind is MediaStreamKind.Video))
+                    {
+                        if (IsPq(stream) && !stream.HasHdr10Metadata)
+                        {
+                            Either<BaseError, bool> probeResult = await ProbeFrameForHdr10Metadata(
+                                ffprobePath,
+                                mediaItemPath,
+                                stream.Index);
+
+                            stream.HasHdr10Metadata = probeResult.IsRight && probeResult.RightToSeq().All(identity);
+                        }
+                    }
+
                     bool result = await ApplyVersionUpdate(mediaItem, version, mediaItemPath);
                     return Right<BaseError, bool>(result);
                 },
@@ -299,7 +336,7 @@ public partial class LocalStatisticsProvider : ILocalStatisticsProvider
         string[] arguments =
         [
             "-hide_banner",
-            "-ss", $"{seek:c}",
+            "-ss", FFmpegFormatter.Milliseconds(seek),
             "-i", filePath,
             "-vf", "idet",
             "-frames:v", "200",
@@ -465,6 +502,54 @@ public partial class LocalStatisticsProvider : ILocalStatisticsProvider
         }
     }
 
+    private static async Task<Either<BaseError, bool>> ProbeFrameForHdr10Metadata(
+        string ffprobePath,
+        string path,
+        int streamIndex)
+    {
+        string[] arguments =
+        [
+            "-hide_banner",
+            "-print_format",
+            "json",
+            "-select_streams",
+            streamIndex.ToString(CultureInfo.InvariantCulture),
+            "-read_intervals",
+            "%+#1",
+            "-show_frames",
+            "-show_entries",
+            "frame=side_data_list",
+            "-i",
+            path
+        ];
+
+        BufferedCommandResult probe = await Cli.Wrap(ffprobePath)
+            .WithArguments(arguments)
+            .WithValidation(CommandResultValidation.None)
+            .ExecuteBufferedAsync(Encoding.UTF8);
+
+        if (probe.ExitCode != 0)
+        {
+            return BaseError.New($"FFprobe at {ffprobePath} exited with code {probe.ExitCode}");
+        }
+
+        FFprobe ffprobe = JsonConvert.DeserializeObject<FFprobe>(probe.StandardOutput);
+        if (ffprobe is not null)
+        {
+            List<FFprobeSideData> sideDataList = await (ffprobe.frames ?? []).HeadOrNone()
+                .Select(f => f.side_data_list ?? [])
+                .IfNoneAsync([]);
+
+            return sideDataList.Any(sd =>
+                Hdr10SideData.Any(hdr => string.Equals(
+                    sd.side_data_type,
+                    hdr,
+                    StringComparison.Ordinal)));
+        }
+
+        return BaseError.New("Unable to deserialize ffprobe output");
+    }
+
     public MediaVersion ProjectToMediaVersion(string path, FFprobe probeOutput) =>
         Optional(probeOutput)
             .Filter(json => json is { format: not null, streams: not null })
@@ -481,7 +566,12 @@ public partial class LocalStatisticsProvider : ILocalStatisticsProvider
                         Chapters = new List<MediaChapter>()
                     };
 
-                    if (double.TryParse(
+                    // format duration is the longest stream, which can be a subtitle that runs past the content
+                    if (GetContentDuration(json.streams) is { } contentDuration)
+                    {
+                        version.Duration = contentDuration;
+                    }
+                    else if (double.TryParse(
                             json.format?.duration,
                             NumberStyles.Number,
                             CultureInfo.InvariantCulture,
@@ -566,6 +656,35 @@ public partial class LocalStatisticsProvider : ILocalStatisticsProvider
                             stream.Forced = videoStream.disposition.forced == 1;
                             stream.AttachedPic = videoStream.disposition.attached_pic == 1;
                         }
+
+                        // side data list is optional
+                        List<FFprobeSideData> sideDataList = videoStream.side_data_list ?? [];
+
+                        // dolby vision profile
+                        foreach (var sideData in sideDataList.Where(sd => string.Equals(
+                                     sd.side_data_type,
+                                     DolbyVisionSideData,
+                                     StringComparison.Ordinal)).HeadOrNone())
+                        {
+                            stream.DvProfile = sideData.dv_profile;
+                        }
+
+                        // container-level hdr10 metadata
+                        if (sideDataList.Any(sd =>
+                                Hdr10SideData.Any(hdr => string.Equals(
+                                    sd.side_data_type,
+                                    hdr,
+                                    StringComparison.Ordinal))))
+                        {
+                            stream.HasHdr10Metadata = true;
+                        }
+
+                        // ffprobe reports the display matrix as a signed ccw angle (e.g. -90); normalize to 0..360
+                        stream.Rotation = sideDataList
+                            .Where(sd => sd.rotation.HasValue)
+                            .Map(sd => ((int)Math.Round(sd.rotation.Value) % 360 + 360) % 360)
+                            .HeadOrNone()
+                            .IfNone(0);
 
                         version.Streams.Add(stream);
                     }
@@ -680,9 +799,16 @@ public partial class LocalStatisticsProvider : ILocalStatisticsProvider
 
         if (mediaItem is RemoteStream remoteStream)
         {
+            DateTimeOffset exp = DateTimeOffset.Now + TimeSpan.FromMinutes(15);
+
+            string sig = InternalUrlSigner.Sign(
+                exp,
+                "remote-stream",
+                $"{remoteStream.Id}");
+
             path = !string.IsNullOrWhiteSpace(remoteStream.Url)
                 ? remoteStream.Url
-                : $"http://localhost:{Settings.StreamingPort}/ffmpeg/remote-stream/{remoteStream.Id}";
+                : $"http://localhost:{Settings.StreamingPort}/internal/ffmpeg/remote-stream/{remoteStream.Id}?exp={exp.ToUnixTimeSeconds()}&sig={sig}";
         }
 
         return Task.FromResult(path);
@@ -706,8 +832,44 @@ public partial class LocalStatisticsProvider : ILocalStatisticsProvider
         return 0;
     }
 
+    // transcoding uses apad with -shortest, so output ends when the video ends
+    private static TimeSpan? GetContentDuration(List<FFprobeStreamData> streams)
+    {
+        FFprobeStreamData videoStream = streams
+            .Where(s => s.codec_type == "video" && s.disposition?.attached_pic != 1)
+            .OrderByDescending(ParseBitRate)
+            .FirstOrDefault();
+        if (videoStream is not null)
+        {
+            return GetStreamDuration(videoStream);
+        }
+
+        var audioDurations = streams
+            .Where(s => s.codec_type == "audio")
+            .Select(GetStreamDuration)
+            .ToList();
+
+        // a max over a partial set could be too short and cut off content
+        return audioDurations.Count > 0 && audioDurations.All(d => d.HasValue) ? audioDurations.Max() : null;
+    }
+
+    private static TimeSpan? GetStreamDuration(FFprobeStreamData stream)
+    {
+        if (double.TryParse(stream.duration, NumberStyles.Number, CultureInfo.InvariantCulture, out double seconds)
+            && seconds > 0)
+        {
+            return TimeSpan.FromSeconds(seconds);
+        }
+
+        return stream.tags?.GetDuration();
+    }
+
     // ReSharper disable InconsistentNaming
-    public record FFprobe(FFprobeFormat format, List<FFprobeStreamData> streams, List<FFprobeChapter> chapters);
+    public record FFprobe(
+        FFprobeFormat format,
+        List<FFprobeStreamData> streams,
+        List<FFprobeChapter> chapters,
+        List<FFprobeFrameData> frames);
 
     public record FFprobeFormat(string duration, FFprobeTags tags);
 
@@ -734,8 +896,13 @@ public partial class LocalStatisticsProvider : ILocalStatisticsProvider
         string r_frame_rate,
         string bit_rate,
         string bits_per_raw_sample,
+        string duration,
         FFprobeDisposition disposition,
-        FFprobeTags tags);
+        FFprobeTags tags,
+        List<FFprobeSideData> side_data_list);
+
+    [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores")]
+    public record FFprobeFrameData(List<FFprobeSideData> side_data_list);
 
     [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores")]
     public record FFprobeChapter(
@@ -759,6 +926,38 @@ public partial class LocalStatisticsProvider : ILocalStatisticsProvider
         [property: JsonProperty(PropertyName = "variant_bitrate")]
         string variantBitrate)
     {
+        [JsonExtensionData]
+        public IDictionary<string, JToken> Extra { get; init; }
+
+        // matroska writes DURATION, or DURATION-<lang> when the tag has a language other than und
+        public TimeSpan? GetDuration()
+        {
+            string value = (Extra ?? new Dictionary<string, JToken>())
+                .Where(kv => kv.Key.Equals("DURATION", StringComparison.OrdinalIgnoreCase)
+                             || kv.Key.StartsWith("DURATION-", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(kv => kv.Key.Length)
+                .Select(kv => kv.Value?.ToString())
+                .FirstOrDefault();
+
+            // hh:mm:ss.nnnnnnnnn doesn't fit TimeSpan.Parse: hours can exceed 23, and the fraction has 9 digits
+            string[] parts = value?.Split(':') ?? [];
+            if (parts.Length == 3
+                && int.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out int hours)
+                && int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out int minutes)
+                && double.TryParse(
+                    parts[2],
+                    NumberStyles.AllowDecimalPoint,
+                    CultureInfo.InvariantCulture,
+                    out double seconds))
+            {
+                var duration = TimeSpan.FromHours(hours) + TimeSpan.FromMinutes(minutes) +
+                               TimeSpan.FromSeconds(seconds);
+                return duration > TimeSpan.Zero ? duration : null;
+            }
+
+            return null;
+        }
+
         public static readonly FFprobeTags Empty = new(
             null,
             null,
@@ -772,6 +971,9 @@ public partial class LocalStatisticsProvider : ILocalStatisticsProvider
             null,
             null);
     }
+
+    [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores")]
+    public record FFprobeSideData(string side_data_type, int? dv_profile, double? rotation);
     // ReSharper restore InconsistentNaming
 
     [GeneratedRegex(@"\[SAR\s+([0-9]+:[0-9]+)\s+DAR\s+([0-9]+:[0-9]+)\]")]
@@ -796,4 +998,9 @@ public partial class LocalStatisticsProvider : ILocalStatisticsProvider
         public int TotalProgressiveFrames => SingleProgressive + MultiProgressive;
         public int TotalFrames => TotalInterlacedFrames + TotalProgressiveFrames;
     }
+
+    private static bool IsPq(MediaStream mediaStream) => string.Equals(
+        mediaStream.ColorTransfer,
+        "smpte2084",
+        StringComparison.OrdinalIgnoreCase);
 }

@@ -53,7 +53,7 @@ public class GraphicsElementSelectorTests
         var loggerFactory = new LoggerFactory().AddSerilog(Log.Logger);
 
         GraphicsElementSelector = new GraphicsElementSelector(
-            new DecoSelector(loggerFactory.CreateLogger<DecoSelector>()),
+            new DecoSelector(),
             loggerFactory.CreateLogger<GraphicsElementSelector>());
 
         GraphicsElementTemplateDeco = new GraphicsElement { Id = 1, Path = "Template Deco GE" };
@@ -368,7 +368,8 @@ public class GraphicsElementSelectorTests
         List<PlayoutItemGraphicsElement> result = GraphicsElementSelector.SelectGraphicsElements(
             testCase.channel,
             testCase.playoutItem,
-            Now);
+            Now,
+            shouldLogMessages: true);
 
         result.Map(pige => pige.GraphicsElement).ShouldBe(testCase.expected);
     }

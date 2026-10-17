@@ -10,6 +10,7 @@ public static class FileSystemLayout
     public static readonly string TranscodeFolder;
     public static readonly string TranscodeTroubleshootingChannel;
     public static readonly string TranscodeTroubleshootingFolder;
+    public static readonly string TranscodeTroubleshootingPlayoutFolder;
 
     public static readonly string DataProtectionFolder;
     public static readonly string LogsFolder;
@@ -24,6 +25,7 @@ public static class FileSystemLayout
     public static readonly string PlexSecretsPath;
     public static readonly string JellyfinSecretsPath;
     public static readonly string EmbySecretsPath;
+    public static readonly string ApiSecretsPath;
 
     public static readonly string FFmpegReportsFolder;
     public static readonly string SearchIndexFolder;
@@ -66,6 +68,9 @@ public static class FileSystemLayout
     public static readonly string MpegTsScriptsFolder;
 
     public static readonly string DefaultMpegTsScriptFolder;
+
+    public static readonly string NextChannelConfigOverlaysFolder;
+    public static readonly string NextPlayoutsFolder;
 
     public static readonly string MacOsOldAppDataFolder = Path.Combine(
         Environment.GetEnvironmentVariable("HOME") ?? string.Empty,
@@ -149,6 +154,7 @@ public static class FileSystemLayout
         PlexSecretsPath = Path.Combine(AppDataFolder, "plex-secrets.json");
         JellyfinSecretsPath = Path.Combine(AppDataFolder, "jellyfin-secrets.json");
         EmbySecretsPath = Path.Combine(AppDataFolder, "emby-secrets.json");
+        ApiSecretsPath = Path.Combine(AppDataFolder, "api-secrets.json");
 
         FFmpegReportsFolder = Path.Combine(AppDataFolder, "ffmpeg-reports");
         SearchIndexFolder = Path.Combine(AppDataFolder, "search-index");
@@ -192,5 +198,9 @@ public static class FileSystemLayout
 
         MpegTsScriptsFolder = Path.Combine(ScriptsFolder, "mpegts");
         DefaultMpegTsScriptFolder = Path.Combine(MpegTsScriptsFolder, "default");
+
+        NextChannelConfigOverlaysFolder = Path.Combine(AppDataFolder, "next", "channel-config-overlays");
+        NextPlayoutsFolder = Path.Combine(AppDataFolder, "next", "playouts");
+        TranscodeTroubleshootingPlayoutFolder = Path.Combine(NextPlayoutsFolder, TranscodeTroubleshootingChannel);
     }
 }

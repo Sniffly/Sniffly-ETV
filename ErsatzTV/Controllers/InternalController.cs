@@ -1,5 +1,8 @@
 ﻿using System.CommandLine.Parsing;
 using System.Diagnostics;
+using System.Globalization;
+using System.IO.Abstractions;
+using System.Text;
 using CliWrap;
 using ErsatzTV.Application.Emby;
 using ErsatzTV.Application.Jellyfin;
@@ -11,29 +14,49 @@ using ErsatzTV.Application.Subtitles.Queries;
 using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.FFmpeg;
+using ErsatzTV.Core.Graphics;
+using ErsatzTV.Core.Interfaces.Scheduling;
 using ErsatzTV.Core.Interfaces.Streaming;
+using ErsatzTV.Core.Security;
 using ErsatzTV.Extensions;
 using ErsatzTV.FFmpeg;
+using ErsatzTV.Infrastructure.Data;
+using ErsatzTV.Infrastructure.Scheduling;
 using Flurl;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Primitives;
 
 namespace ErsatzTV.Controllers;
 
 [ApiController]
 [ApiExplorerSettings(IgnoreApi = true)]
+[Route("internal")]
 public class InternalController : StreamingControllerBase
 {
     private readonly ILogger<InternalController> _logger;
     private readonly IMediator _mediator;
+    private readonly IDbContextFactory<TvContext> _dbContextFactory;
+    private readonly IDynamicPlayoutItemService _dynamicPlayoutItemService;
+    private readonly IPlayoutItemConverter _playoutItemConverter;
+    private readonly IFileSystem _fileSystem;
 
     public InternalController(
         IGraphicsEngine graphicsEngine,
         IMediator mediator,
+        IDbContextFactory<TvContext> dbContextFactory,
+        IDynamicPlayoutItemService dynamicPlayoutItemService,
+        IPlayoutItemConverter playoutItemConverter,
+        IFileSystem fileSystem,
         ILogger<InternalController> logger)
         : base(graphicsEngine, logger)
     {
         _mediator = mediator;
+        _dbContextFactory = dbContextFactory;
+        _dynamicPlayoutItemService = dynamicPlayoutItemService;
+        _playoutItemConverter = playoutItemConverter;
+        _fileSystem = fileSystem;
         _logger = logger;
     }
 
@@ -46,9 +69,67 @@ public class InternalController : StreamingControllerBase
     [HttpGet("ffmpeg/stream/{channelNumber}")]
     public Task<IActionResult> GetStream(string channelNumber) => GetTsLegacyStream(channelNumber);
 
-    [HttpGet("ffmpeg/remote-stream/{remoteStreamId}")]
-    public async Task<IActionResult> GetRemoteStream(int remoteStreamId, CancellationToken cancellationToken)
+    [HttpGet("ffmpeg/music-video-credits/{playoutItemId:int}")]
+    public async Task<IActionResult> GetMusicVideoCredits(
+        int playoutItemId,
+        [FromQuery]
+        long? seekToMs,
+        CancellationToken cancellationToken)
     {
+        Option<string> maybeCreditsFile = await _mediator.Send(
+            new GetMusicVideoCreditsByPlayoutItemId(playoutItemId, Optional(seekToMs)),
+            cancellationToken);
+        foreach (string creditsFile in maybeCreditsFile)
+        {
+            return new PhysicalFileResult(creditsFile, "text/x-ssa");
+        }
+
+        return File(Encoding.UTF8.GetBytes(EmptySubtitleDocument("text/x-ssa")), "text/x-ssa");
+    }
+
+    [HttpGet("ffmpeg/song-background/{channelId:int}/{playoutItemId:int}")]
+    public async Task<IActionResult> GetSongBackground(
+        int channelId,
+        int playoutItemId,
+        [FromQuery]
+        string exp,
+        [FromQuery]
+        string sig,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(exp) || string.IsNullOrWhiteSpace(sig) ||
+            !InternalUrlSigner.Verify(exp, sig, "song-background", $"{channelId}", $"{playoutItemId}"))
+        {
+            return NotFound();
+        }
+
+        Option<string> maybeSongBackground = await _mediator.Send(
+            new GetSongVideoBackgroundByPlayoutItemId(channelId, playoutItemId),
+            cancellationToken);
+        foreach (string songBackground in maybeSongBackground)
+        {
+            return new PhysicalFileResult(songBackground, "image/png");
+        }
+
+        string path = _fileSystem.Path.Combine(FileSystemLayout.ResourcesCacheFolder, "_song_background_1.png");
+        return new PhysicalFileResult(path, "image/png");
+    }
+
+    [HttpGet("ffmpeg/remote-stream/{remoteStreamId:int}")]
+    public async Task<IActionResult> GetRemoteStream(
+        int remoteStreamId,
+        [FromQuery]
+        string exp,
+        [FromQuery]
+        string sig,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(exp) || string.IsNullOrWhiteSpace(sig) ||
+            !InternalUrlSigner.Verify(exp, sig, "remote-stream", $"{remoteStreamId}"))
+        {
+            return NotFound();
+        }
+
         Option<RemoteStreamViewModel> maybeRemoteStream =
             await _mediator.Send(new GetRemoteStreamById(remoteStreamId), cancellationToken);
 
@@ -101,12 +182,20 @@ public class InternalController : StreamingControllerBase
         return NotFound();
     }
 
-    [HttpGet("/media/plex/{plexMediaSourceId:int}/{*path}")]
+    [HttpGet("media/plex/{plexMediaSourceId:int}/{*path}")]
     public async Task<IActionResult> GetPlexMedia(
         int plexMediaSourceId,
         string path,
+        [FromQuery] string exp,
+        [FromQuery] string sig,
         CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(exp) || string.IsNullOrWhiteSpace(sig) ||
+            !InternalUrlSigner.Verify(exp, sig, "plex", $"{plexMediaSourceId}", path))
+        {
+            return NotFound();
+        }
+
 #if DEBUG_NO_SYNC
         await Task.Delay(100, cancellationToken);
         return NotFound();
@@ -118,15 +207,28 @@ public class InternalController : StreamingControllerBase
             Left: _ => new NotFoundResult(),
             Right: r =>
             {
-                Url fullPath = new Uri(r.Uri, path).SetQueryParam("X-Plex-Token", r.AuthToken);
+                Url fullPath = Flurl.Url.Parse(r.Address)
+                    .AppendPathSegment(path)
+                    .SetQueryParam("X-Plex-Token", r.AuthToken);
+
                 return new RedirectResult(fullPath.ToString());
             });
 #endif
     }
 
-    [HttpGet("/media/jellyfin/{*path}")]
-    public async Task<IActionResult> GetJellyfinMedia(string path, CancellationToken cancellationToken)
+    [HttpGet("media/jellyfin/{*path}")]
+    public async Task<IActionResult> GetJellyfinMedia(
+        string path,
+        [FromQuery] string exp,
+        [FromQuery] string sig,
+        CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(exp) || string.IsNullOrWhiteSpace(sig) ||
+            !InternalUrlSigner.Verify(exp, sig, "jellyfin", path))
+        {
+            return NotFound();
+        }
+
         Either<BaseError, JellyfinConnectionParametersViewModel> connectionParameters =
             await _mediator.Send(new GetJellyfinConnectionParameters(), cancellationToken);
 
@@ -139,7 +241,8 @@ public class InternalController : StreamingControllerBase
                 if (path.Contains("Subtitles"))
                 {
                     fullPath = Flurl.Url.Parse(r.Address)
-                        .AppendPathSegment(path);
+                        .AppendPathSegment(path)
+                        .SetQueryParam("ApiKey", r.ApiKey);
                 }
                 else
                 {
@@ -147,16 +250,27 @@ public class InternalController : StreamingControllerBase
                         .AppendPathSegment("Videos")
                         .AppendPathSegment(path)
                         .AppendPathSegment("stream")
-                        .SetQueryParam("static", "true");
+                        .SetQueryParam("static", "true")
+                        .SetQueryParam("ApiKey", r.ApiKey);
                 }
 
                 return new RedirectResult(fullPath.ToString());
             });
     }
 
-    [HttpGet("/media/emby/{*path}")]
-    public async Task<IActionResult> GetEmbyMedia(string path, CancellationToken cancellationToken)
+    [HttpGet("media/emby/{*path}")]
+    public async Task<IActionResult> GetEmbyMedia(
+        string path,
+        [FromQuery] string exp,
+        [FromQuery] string sig,
+        CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(exp) || string.IsNullOrWhiteSpace(sig) ||
+            !InternalUrlSigner.Verify(exp, sig, "emby", path))
+        {
+            return NotFound();
+        }
+
         Either<BaseError, EmbyConnectionParametersViewModel> connectionParameters =
             await _mediator.Send(new GetEmbyConnectionParameters(), cancellationToken);
 
@@ -186,10 +300,23 @@ public class InternalController : StreamingControllerBase
             });
     }
 
-    [HttpGet("/media/subtitle/{id:int}")]
-    public async Task<IActionResult> GetSubtitle(int id, [FromQuery] long? seekToMs)
+    [HttpGet("media/subtitle/{id:int}")]
+    public async Task<IActionResult> GetSubtitle(
+        int id,
+        [FromQuery] string exp,
+        [FromQuery] string sig,
+        [FromQuery] long? seekToMs,
+        CancellationToken cancellationToken)
     {
-        Either<BaseError, SubtitlePathAndCodec> maybePath = await _mediator.Send(new GetSubtitlePathById(id));
+        if (string.IsNullOrWhiteSpace(exp) || string.IsNullOrWhiteSpace(sig) ||
+            !InternalUrlSigner.Verify(exp, sig, "subtitle", $"{id}"))
+        {
+            return NotFound();
+        }
+
+        Either<BaseError, SubtitlePathAndCodec> maybePath = await _mediator.Send(
+            new GetSubtitlePathById(id),
+            cancellationToken);
 
         foreach (SubtitlePathAndCodec pathAndCodec in maybePath.RightToSeq())
         {
@@ -205,7 +332,8 @@ public class InternalController : StreamingControllerBase
             if (seekToMs is > 0)
             {
                 Either<BaseError, SeekTextSubtitleProcess> maybeProcess = await _mediator.Send(
-                    new GetSeekTextSubtitleProcess(pathAndCodec, TimeSpan.FromMilliseconds(seekToMs.Value)));
+                    new GetSeekTextSubtitleProcess(pathAndCodec, TimeSpan.FromMilliseconds(seekToMs.Value)),
+                    cancellationToken);
                 foreach (SeekTextSubtitleProcess processModel in maybeProcess.RightToSeq())
                 {
                     Command command = processModel.Process;
@@ -233,10 +361,20 @@ public class InternalController : StreamingControllerBase
                     }
 
                     process.Start();
-                    return new FileStreamResult(process.StandardOutput.BaseStream, mimeType);
+                    using var buffer = new MemoryStream();
+                    await process.StandardOutput.BaseStream.CopyToAsync(buffer, cancellationToken);
+                    await process.WaitForExitAsync(cancellationToken);
+
+                    byte[] bytes = buffer.ToArray();
+                    if (bytes.Length == 0)
+                    {
+                        return Content(EmptySubtitleDocument(mimeType), mimeType);
+                    }
+
+                    return File(bytes, mimeType);
                 }
 
-                return new NotFoundResult();
+                return Content(EmptySubtitleDocument(mimeType), mimeType);
             }
 
             if (pathAndCodec.Path.StartsWith("http", StringComparison.OrdinalIgnoreCase))
@@ -248,6 +386,158 @@ public class InternalController : StreamingControllerBase
         }
 
         return new NotFoundResult();
+    }
+
+    [HttpGet("graphics/{channelNumber}/{playoutItemId:int}")]
+    public async Task<IActionResult> GetGraphicsCanvas(
+        string channelNumber,
+        int playoutItemId,
+        [FromQuery] string exp,
+        [FromQuery] string sig,
+        [FromQuery] string region)
+    {
+        if (string.IsNullOrWhiteSpace(exp) || string.IsNullOrWhiteSpace(sig) ||
+            !InternalUrlSigner.Verify(exp, sig, "graphics", channelNumber, $"{playoutItemId}", region ?? string.Empty))
+        {
+            return NotFound();
+        }
+
+        Option<CanvasRegion> maybeRegion = None;
+        if (!string.IsNullOrWhiteSpace(region))
+        {
+            maybeRegion = CanvasRegion.Parse(region);
+            if (maybeRegion.IsNone)
+            {
+                return BadRequest();
+            }
+        }
+
+        const long maxMilliseconds = long.MaxValue / TimeSpan.TicksPerMillisecond;
+        if (!TryGetHeader("x-etv-offset-ms", out string offsetMsString) ||
+            !long.TryParse(offsetMsString, NumberStyles.None, CultureInfo.InvariantCulture, out long offsetMs) ||
+            offsetMs > maxMilliseconds)
+        {
+            return BadRequest();
+        }
+
+        if (!TryGetHeader("x-etv-duration-ms", out string durationMsString) ||
+            !long.TryParse(durationMsString, NumberStyles.None, CultureInfo.InvariantCulture, out long durationMs) ||
+            durationMs <= 0 || durationMs > maxMilliseconds - offsetMs)
+        {
+            return BadRequest();
+        }
+
+        if (!TryGetHeader("x-etv-frame-rate", out string frameRate))
+        {
+            return BadRequest();
+        }
+
+        string[] rateParts = frameRate.Split('/');
+        double parsedFrameRate;
+        if (rateParts.Length == 2 &&
+            int.TryParse(rateParts[0], NumberStyles.None, CultureInfo.InvariantCulture, out int numerator) && numerator > 0 &&
+            int.TryParse(rateParts[1], NumberStyles.None, CultureInfo.InvariantCulture, out int denominator) && denominator > 0)
+        {
+            parsedFrameRate = numerator / (double)denominator;
+        }
+        else if (rateParts.Length != 1 ||
+                 !double.TryParse(frameRate, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out parsedFrameRate) ||
+                 !double.IsFinite(parsedFrameRate) || parsedFrameRate <= 0)
+        {
+            return BadRequest();
+        }
+
+        if (Request.Headers.ContainsKey("x-etv-channel") &&
+            (!TryGetHeader("x-etv-channel", out string headerChannelNumber) || headerChannelNumber != channelNumber))
+        {
+            return BadRequest();
+        }
+
+        Option<Stream> maybeStream = await _mediator.Send(
+            new GetGraphicsCanvasStream(
+                channelNumber,
+                playoutItemId,
+                TimeSpan.FromTicks(offsetMs * TimeSpan.TicksPerMillisecond),
+                TimeSpan.FromTicks(durationMs * TimeSpan.TicksPerMillisecond),
+                new FrameRate(frameRate) { ParsedFrameRate = parsedFrameRate },
+                maybeRegion),
+            HttpContext.RequestAborted);
+
+        foreach (Stream stream in maybeStream)
+        {
+            return new FileStreamResult(stream, "application/octet-stream");
+        }
+
+        return NotFound();
+    }
+
+    [HttpGet("media/fallback")]
+    public async Task<IActionResult> GetFallbackPlayoutJson(
+        [FromQuery] string exp,
+        [FromQuery] string sig,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(exp) || string.IsNullOrWhiteSpace(sig) ||
+            !InternalUrlSigner.Verify(exp, sig, "fallback"))
+        {
+            return NotFound();
+        }
+
+        if (!Request.Headers.TryGetValue("x-etv-channel", out StringValues channelNumber) || channelNumber.Count != 1)
+        {
+            return BadRequest();
+        }
+
+        if (!Request.Headers.TryGetValue("x-etv-now", out StringValues nowString) || nowString.Count != 1 ||
+            !DateTimeOffset.TryParse(nowString[0], out DateTimeOffset now))
+        {
+            return BadRequest();
+        }
+
+        await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
+        Option<Channel> maybeChannel = await dbContext.Channels
+            .SingleOrDefaultAsync(c => c.Number == channelNumber[0], cancellationToken)
+            .Map(Optional);
+
+        foreach (var channel in maybeChannel)
+        {
+            Either<BaseError, PlayoutItemWithPath> maybePlayoutItem =
+                await _dynamicPlayoutItemService.CheckForFallbackFiller(
+                    dbContext,
+                    channel,
+                    now,
+                    cancellationToken);
+
+            foreach (var itemWithPath in maybePlayoutItem.RightToSeq())
+            {
+                Option<Core.Next.PlayoutItem> maybeNextPlayoutItem = await _playoutItemConverter.ToNext(
+                    channelNumber[0],
+                    itemWithPath.PlayoutItem,
+                    cancellationToken);
+
+                foreach (Core.Next.PlayoutItem nextPlayoutItem in maybeNextPlayoutItem)
+                {
+                    return Content(
+                        System.Text.Json.JsonSerializer.Serialize(nextPlayoutItem, Core.Next.Converter.Settings),
+                        "application/json");
+                }
+            }
+
+        }
+
+        return NotFound();
+    }
+
+    private bool TryGetHeader(string name, out string value)
+    {
+        value = null;
+        if (Request.Headers.TryGetValue(name, out StringValues values) && values.Count == 1)
+        {
+            value = values[0];
+            return value is not null;
+        }
+
+        return false;
     }
 
     private async Task<IActionResult> GetTsLegacyStream(string channelNumber)
@@ -268,4 +558,13 @@ public class InternalController : StreamingControllerBase
 
         return GetProcessResponse(result, channelNumber, StreamingMode.TransportStream);
     }
+
+    private static string EmptySubtitleDocument(string mimeType) => mimeType switch
+    {
+        "text/x-ssa" => "[Script Info]\nScriptType: v4.00+\n\n" +
+                        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize\nStyle: Default,Arial,20\n\n" +
+                        "[Events]\nFormat: Layer, Start, End, Style, Text\n",
+        "text/vtt" => "WEBVTT\n\n",
+        _ => "1\n00:00:00,000 --> 00:00:00,001\n \n\n"
+    };
 }

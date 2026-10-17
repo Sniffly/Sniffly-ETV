@@ -15,9 +15,13 @@ public record GraphicsEngineContext(
     FrameRate FrameRate,
     DateTimeOffset ChannelStartTime,
     DateTimeOffset ContentStartTime,
+    DateTimeOffset ContentFinishTime,
     TimeSpan Seek,
     TimeSpan Duration,
-    TimeSpan ContentTotalDuration);
+    TimeSpan ContentTotalDuration)
+{
+    public Option<CanvasRegion> Region { get; init; }
+}
 
 public abstract record GraphicsElementContext;
 
@@ -28,7 +32,10 @@ public record TextElementDataContext(TextGraphicsElement TextElement) : Graphics
     public int EpgEntries => TextElement.EpgEntries;
 }
 
-public record ImageElementContext(ImageGraphicsElement ImageElement) : GraphicsElementContext;
+public record ImageElementDataContext(ImageGraphicsElement ImageElement) : GraphicsElementContext, ITemplateDataContext
+{
+    public int EpgEntries => ImageElement.EpgEntries;
+}
 
 public record MotionElementDataContext(MotionGraphicsElement MotionElement)
     : GraphicsElementContext, ITemplateDataContext

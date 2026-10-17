@@ -1,8 +1,9 @@
-﻿@page "/"
+@page "/"
 @page "/system/health"
-@using System.Reflection
 @using ErsatzTV.Application.Health
 @using ErsatzTV.Core.Health
+@using System.Reflection
+@using System.Text.RegularExpressions
 @using ErsatzTV.Core.Interfaces.GitHub
 @using Microsoft.Extensions.Caching.Memory
 @implements IDisposable
@@ -50,12 +51,20 @@
             }
             else
             {
-                <MudText Typo="Typo.h5" Class="mb-2">Health Checks</MudText>
+                <div class="d-flex flex-row align-center mb-2">
+                    <MudText Typo="Typo.h5">Health Checks</MudText>
+                    <MudIconButton Icon="@Icons.Material.Filled.Refresh"
+                                   Size="Size.Small"
+                                   Class="ml-2"
+                                   title="Re-run health checks"
+                                   OnClick="@RefreshHealthChecks"/>
+                </div>
                 <MudDivider Class="mb-6"/>
                 <MudTable Hover="true"
                           Dense="true"
                           Breakpoint="Breakpoint.None"
-                          ServerData="@(new Func<TableState, CancellationToken, Task<TableData<HealthCheckResult>>>(ServerReload))">
+                          ServerData="@(ServerReload)"
+                          @ref="_healthCheckTable">
                     <HeaderContent>
                         <MudTh>Check</MudTh>
                         <MudTh>Message</MudTh>
@@ -131,7 +140,7 @@
                 </MudTable>
                 <MudCard Class="mt-6">
                     <MudCardHeader>
-                        <MudText Class="mt-6">Full changelog is available on <MudLink Href="https://github.com/ErsatzTV/ErsatzTV/blob/main/CHANGELOG.md" Target="_blank">GitHub</MudLink></MudText>
+                        <MudText Class="mt-6">Full changelog is available on <MudLink Href="https://github.com/ErsatzTV/legacy/blob/main/CHANGELOG.md" Target="_blank">GitHub</MudLink></MudText>
                     </MudCardHeader>
                     <MudCardContent Class="release-notes mud-typography mud-typography-body1">
                         <MarkdownView Content="@_releaseNotes"/>
@@ -144,6 +153,10 @@
 
 @code {
     private CancellationTokenSource _cts;
+
+    private MudTable<HealthCheckResult> _healthCheckTable;
+
+    private bool _refreshHealthChecks;
 
     private string _releaseNotes;
 
@@ -197,7 +210,19 @@
                     {
                         Either<BaseError, string> maybeNotes;
 
-                        if (version != "develop")
+                        // develop builds report v<next release>-<sha8>-<target>; their release is
+                        // v<next release>-<sha8>-develop in the develop builds repository
+                        Match developBuild = Regex.Match(version, @"^v?(\d+\.\d+\.\d+)-([0-9a-f]{8})-");
+                        if (developBuild.Success)
+                        {
+                            string developTag = $"v{developBuild.Groups[1].Value}-{developBuild.Groups[2].Value}-develop";
+                            maybeNotes = await GitHubApiClient.GetDevelopReleaseNotes(developTag, token);
+                            foreach (string notes in maybeNotes.RightToSeq())
+                            {
+                                _releaseNotes = notes;
+                            }
+                        }
+                        else if (version != "develop")
                         {
                             string gitHubVersion = version.Split("-").Head();
                             if (!gitHubVersion.StartsWith("v"))
@@ -234,9 +259,22 @@
         }
     }
 
+    private async Task RefreshHealthChecks()
+    {
+        _refreshHealthChecks = true;
+
+        if (_healthCheckTable != null)
+        {
+            await _healthCheckTable.ReloadServerData();
+        }
+    }
+
     private async Task<TableData<HealthCheckResult>> ServerReload(TableState state, CancellationToken cancellationToken)
     {
-        List<HealthCheckResult> healthCheckResults = await Mediator.Send(new GetAllHealthCheckResults(), cancellationToken);
+        bool refresh = _refreshHealthChecks;
+        _refreshHealthChecks = false;
+
+        List<HealthCheckResult> healthCheckResults = await Mediator.Send(new GetAllHealthCheckResults(refresh), cancellationToken);
 
         return new TableData<HealthCheckResult>
         {

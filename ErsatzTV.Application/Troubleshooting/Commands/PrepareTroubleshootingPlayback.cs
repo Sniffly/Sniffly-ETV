@@ -9,11 +9,13 @@ public record PrepareTroubleshootingPlayback(
     StreamingMode StreamingMode,
     int MediaItemId,
     int ChannelId,
+    StreamingEngine StreamingEngine,
     int FFmpegProfileId,
     string StreamSelector,
     List<int> WatermarkIds,
     List<int> GraphicsElementIds,
     int? SubtitleId,
+    string MusicVideoCreditsTemplate,
     Option<int> SeekSeconds,
     Option<DateTimeOffset> Start)
     : IRequest<Either<BaseError, PlayoutItemResult>>;

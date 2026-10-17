@@ -154,8 +154,8 @@ public class MovieRepository : IMovieRepository
     {
         await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync();
         return await dbContext.Connection.ExecuteAsync(
-            "INSERT INTO Tag (Name, MovieMetadataId, ExternalCollectionId) VALUES (@Name, @MetadataId, @ExternalCollectionId)",
-            new { tag.Name, MetadataId = metadata.Id, tag.ExternalCollectionId }).Map(result => result > 0);
+            "INSERT INTO Tag (Name, MovieMetadataId, ExternalCollectionId, ExternalTypeId) VALUES (@Name, @MetadataId, @ExternalCollectionId, @ExternalTypeId)",
+            new { tag.Name, MetadataId = metadata.Id, tag.ExternalCollectionId, tag.ExternalTypeId }).Map(result => result > 0);
     }
 
     public async Task<bool> AddStudio(MovieMetadata metadata, Studio studio)
@@ -195,12 +195,12 @@ public class MovieRepository : IMovieRepository
             .Map(result => result > 0);
     }
 
-    public async Task<bool> UpdateSortTitle(MovieMetadata movieMetadata)
+    public async Task<bool> UpdateTitles(MovieMetadata movieMetadata, string title, string sortTitle)
     {
         await using TvContext dbContext = await _dbContextFactory.CreateDbContextAsync();
         return await dbContext.Connection.ExecuteAsync(
-            @"UPDATE MovieMetadata SET SortTitle = @SortTitle WHERE Id = @Id",
-            new { movieMetadata.SortTitle, movieMetadata.Id }).Map(result => result > 0);
+            @"UPDATE MovieMetadata SET Title = @Title, SortTitle = @SortTitle WHERE Id = @Id",
+            new { Title = title, SortTitle = sortTitle, movieMetadata.Id }).Map(result => result > 0);
     }
 
     public async Task<bool> AddDirector(MovieMetadata metadata, Director director)

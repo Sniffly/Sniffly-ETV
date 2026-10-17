@@ -104,7 +104,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -134,7 +135,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -164,7 +166,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -200,7 +203,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -231,7 +235,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -263,7 +268,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -295,7 +301,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.Subtitle.IsSome.ShouldBeFalse();
         }
@@ -322,7 +329,45 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
+
+            result.Subtitle.IsSome.ShouldBeTrue();
+
+            foreach (Subtitle subtitle in result.Subtitle)
+            {
+                subtitle.Id.ShouldBe(2);
+                subtitle.Language.ShouldBe("eng");
+            }
+        }
+
+        [Test]
+        public async Task Should_Select_eng_Subtitle_Exact_Match_Extracted_Next()
+        {
+            const string YAML =
+                """
+                ---
+                items:
+                  - audio_language:
+                    - "ja"
+                    subtitle_language:
+                    - "eng"
+                """;
+
+            var fileSystem = new MockFileSystem();
+            fileSystem.Initialize()
+                .WithFile(TestFileName).Which(f => f.HasStringContent(YAML));
+            var streamSelector = new CustomStreamSelector(fileSystem, _logger);
+
+            _channel.StreamingEngine = StreamingEngine.Next;
+            _channel.StreamingMode = StreamingMode.HttpLiveStreamingSegmenter;
+
+            StreamSelectorResult result = await streamSelector.SelectStreams(
+                _channel,
+                DateTimeOffset.Now,
+                _audioVersion,
+                _subtitles,
+                shouldLogMessages: true);
 
             result.Subtitle.IsSome.ShouldBeTrue();
 
@@ -355,7 +400,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.Subtitle.IsSome.ShouldBeTrue();
 
@@ -397,7 +443,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.Subtitle.IsSome.ShouldBeTrue();
 
@@ -433,7 +480,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -471,7 +519,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -514,7 +563,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now.LocalDateTime.Date.AddHours(11).AddMinutes(59), // 11:59 AM
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -551,7 +601,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now.LocalDateTime.Date.AddHours(11).AddMinutes(59), // 11:59 AM
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -594,7 +645,12 @@ public class CustomStreamSelectorTests
             var start = new DateTime(2026, 1, 11, 0, 0, 0, DateTimeKind.Unspecified); // sunday
             var dto = new DateTimeOffset(start, tz.GetUtcOffset(start));
 
-            StreamSelectorResult result = await streamSelector.SelectStreams(_channel, dto, _audioVersion, _subtitles);
+            StreamSelectorResult result = await streamSelector.SelectStreams(
+                _channel,
+                dto,
+                _audioVersion,
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -631,7 +687,12 @@ public class CustomStreamSelectorTests
             var start = new DateTime(2026, 1, 11, 0, 0, 0, DateTimeKind.Unspecified); // sunday
             var dto = new DateTimeOffset(start, tz.GetUtcOffset(start));
 
-            StreamSelectorResult result = await streamSelector.SelectStreams(_channel, dto, _audioVersion, _subtitles);
+            StreamSelectorResult result = await streamSelector.SelectStreams(
+                _channel,
+                dto,
+                _audioVersion,
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -651,7 +712,8 @@ public class CustomStreamSelectorTests
         }
 
         [Test]
-        public async Task Should_Select_English_Audio_No_Subtitles_Day_Of_Week_Time_Of_Day_Content_Condition_Fail_Before()
+        public async Task
+            Should_Select_English_Audio_No_Subtitles_Day_Of_Week_Time_Of_Day_Content_Condition_Fail_Before()
         {
             // saturday from 9pm-11pm
             const string YAML =
@@ -675,7 +737,12 @@ public class CustomStreamSelectorTests
             var start = new DateTime(2026, 1, 10, 20, 59, 59, DateTimeKind.Unspecified); // saturday at 8:59:59pm
             var dto = new DateTimeOffset(start, tz.GetUtcOffset(start));
 
-            StreamSelectorResult result = await streamSelector.SelectStreams(_channel, dto, _audioVersion, _subtitles);
+            StreamSelectorResult result = await streamSelector.SelectStreams(
+                _channel,
+                dto,
+                _audioVersion,
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -689,7 +756,8 @@ public class CustomStreamSelectorTests
         }
 
         [Test]
-        public async Task Should_Select_English_Audio_No_Subtitles_Day_Of_Week_Time_Of_Day_Content_Condition_Fail_After()
+        public async Task
+            Should_Select_English_Audio_No_Subtitles_Day_Of_Week_Time_Of_Day_Content_Condition_Fail_After()
         {
             // saturday from 9pm-11pm
             const string YAML =
@@ -713,7 +781,12 @@ public class CustomStreamSelectorTests
             var start = new DateTime(2026, 1, 10, 23, 0, 0, DateTimeKind.Unspecified); // saturday at 11:00pm
             var dto = new DateTimeOffset(start, tz.GetUtcOffset(start));
 
-            StreamSelectorResult result = await streamSelector.SelectStreams(_channel, dto, _audioVersion, _subtitles);
+            StreamSelectorResult result = await streamSelector.SelectStreams(
+                _channel,
+                dto,
+                _audioVersion,
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -727,7 +800,8 @@ public class CustomStreamSelectorTests
         }
 
         [Test]
-        public async Task Should_Select_English_Audio_No_Subtitles_Day_Of_Week_Time_Of_Day_Content_Condition_Fail_Wrong_Day()
+        public async Task
+            Should_Select_English_Audio_No_Subtitles_Day_Of_Week_Time_Of_Day_Content_Condition_Fail_Wrong_Day()
         {
             // saturday from 9pm-11pm
             const string YAML =
@@ -751,7 +825,12 @@ public class CustomStreamSelectorTests
             var start = new DateTime(2026, 1, 11, 22, 0, 0, DateTimeKind.Unspecified); // sunday at 10:00pm
             var dto = new DateTimeOffset(start, tz.GetUtcOffset(start));
 
-            StreamSelectorResult result = await streamSelector.SelectStreams(_channel, dto, _audioVersion, _subtitles);
+            StreamSelectorResult result = await streamSelector.SelectStreams(
+                _channel,
+                dto,
+                _audioVersion,
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -789,7 +868,12 @@ public class CustomStreamSelectorTests
             var start = new DateTime(2026, 1, 10, 22, 0, 0, DateTimeKind.Unspecified); // saturday at 10:00pm
             var dto = new DateTimeOffset(start, tz.GetUtcOffset(start));
 
-            StreamSelectorResult result = await streamSelector.SelectStreams(_channel, dto, _audioVersion, _subtitles);
+            StreamSelectorResult result = await streamSelector.SelectStreams(
+                _channel,
+                dto,
+                _audioVersion,
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -810,7 +894,8 @@ public class CustomStreamSelectorTests
 
         [Test]
         [SetCulture("fr-FR")]
-        public async Task Should_Select_English_Audio_No_Subtitles_Day_Of_Week_Time_Of_Day_Content_Condition_Match_France()
+        public async Task
+            Should_Select_English_Audio_No_Subtitles_Day_Of_Week_Time_Of_Day_Content_Condition_Match_France()
         {
             // saturday from 9pm-11pm
             const string YAML =
@@ -834,7 +919,12 @@ public class CustomStreamSelectorTests
             var start = new DateTime(2026, 1, 10, 22, 0, 0, DateTimeKind.Unspecified); // saturday at 10:00pm
             var dto = new DateTimeOffset(start, tz.GetUtcOffset(start));
 
-            StreamSelectorResult result = await streamSelector.SelectStreams(_channel, dto, _audioVersion, _subtitles);
+            StreamSelectorResult result = await streamSelector.SelectStreams(
+                _channel,
+                dto,
+                _audioVersion,
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -875,7 +965,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -908,7 +999,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -943,7 +1035,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.Subtitle.IsSome.ShouldBeTrue();
 
@@ -978,7 +1071,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.Subtitle.IsSome.ShouldBeTrue();
 
@@ -1010,7 +1104,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.Subtitle.IsSome.ShouldBeTrue();
 
@@ -1042,7 +1137,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.Subtitle.IsSome.ShouldBeTrue();
 
@@ -1074,7 +1170,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -1106,7 +1203,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -1137,7 +1235,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeTrue();
 
@@ -1169,7 +1268,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.Subtitle.IsSome.ShouldBeTrue();
 
@@ -1202,7 +1302,8 @@ public class CustomStreamSelectorTests
                 _channel,
                 DateTimeOffset.Now,
                 _audioVersion,
-                _subtitles);
+                _subtitles,
+                shouldLogMessages: true);
 
             result.AudioStream.IsSome.ShouldBeFalse();
             result.Subtitle.IsSome.ShouldBeFalse();

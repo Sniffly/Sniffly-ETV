@@ -15,6 +15,11 @@ namespace ErsatzTV.Core.Scheduling;
 public abstract class PlayoutModeSchedulerBase<T>(ILogger logger) : IPlayoutModeScheduler<T>
     where T : ProgramScheduleItem
 {
+    // half a day, so that a flexible item always moves to whichever occurrence of its start time
+    // is nearest; waiting longer than this would mean the start time is one we already missed
+    // ReSharper disable once StaticMemberInGenericType
+    private static readonly TimeSpan MaximumFlexibleWait = TimeSpan.FromHours(12);
+
     // ReSharper disable once StaticMemberInGenericType
     private static readonly JsonSerializerOptions Options = new()
     {
@@ -82,6 +87,13 @@ public abstract class PlayoutModeSchedulerBase<T>(ILogger logger) : IPlayoutMode
 
             DateTimeOffset result = new DateTimeOffset(withStartTime, TimeZoneInfo.Local.GetUtcOffset(withStartTime));
 
+            // tomorrow's occurrence of the same start time; the offset has to be re-derived rather than
+            // carried over from result, or a DST change between the two shifts the wall clock by the delta
+            DateTime tomorrowWithStartTime = withStartTime.AddDays(1);
+            DateTimeOffset tomorrowResult = new DateTimeOffset(
+                tomorrowWithStartTime,
+                TimeZoneInfo.Local.GetUtcOffset(tomorrowWithStartTime));
+
             // Serilog.Log.Logger.Debug(
             //     "StartTimeOfDay: {StartTimeOfDay} Item Start Time: {ItemStartTime}",
             //     startTime.TimeOfDay.TotalMilliseconds,
@@ -101,12 +113,18 @@ public abstract class PlayoutModeSchedulerBase<T>(ILogger logger) : IPlayoutMode
                     // we should use the next day's time to allow the flood to continue.
                     if (isPeek && state.InFlood && startTime > result)
                     {
-                        startTime = result.AddDays(1);
+                        startTime = tomorrowResult;
                     }
-                    // otherwise, only wait for times on the same day
-                    else if (result.Day == startTime.Day && result.TimeOfDay > startTime.TimeOfDay)
+                    else
                     {
-                        startTime = result;
+                        // wait for the next occurrence of the start time, unless it is far enough away
+                        // that the occurrence we just missed is the nearer one - waiting for that would
+                        // add most of a day of unscheduled time, which is what flexible exists to avoid
+                        DateTimeOffset nextOccurrence = result >= startTime ? result : tomorrowResult;
+                        if (nextOccurrence - startTime <= MaximumFlexibleWait)
+                        {
+                            startTime = nextOccurrence;
+                        }
                     }
 
                     break;
@@ -159,6 +177,11 @@ public abstract class PlayoutModeSchedulerBase<T>(ILogger logger) : IPlayoutMode
                 TimeSpan itemDuration = mediaItem.GetDurationForPlayout();
                 TimeSpan inPoint = InPointForMediaItem(mediaItem);
 
+                if (itemDuration <= TimeSpan.Zero)
+                {
+                    break;
+                }
+
                 if (nextState.CurrentTime + itemDuration > nextItemStart)
                 {
                     warnings.TailFillerTooLong++;
@@ -210,19 +233,33 @@ public abstract class PlayoutModeSchedulerBase<T>(ILogger logger) : IPlayoutMode
             IMediaCollectionEnumerator enumerator =
                 collectionEnumerators[CollectionKey.ForFillerPreset(scheduleItem.FallbackFiller)];
 
-            foreach (MediaItem mediaItem in enumerator.Current)
+            while (enumerator.Current.IsSome && nextState.CurrentTime < nextItemStart)
             {
+                MediaItem mediaItem = enumerator.Current.ValueUnsafe();
+
+                TimeSpan itemDuration = mediaItem.GetDurationForPlayout();
+
+                if (itemDuration <= TimeSpan.Zero)
+                {
+                    break;
+                }
+
+                TimeSpan gap = nextItemStart - nextState.CurrentTime;
+                TimeSpan duration = itemDuration < gap ? itemDuration : gap;
+                TimeSpan inPoint = InPointForMediaItem(mediaItem);
+
                 var playoutItem = new PlayoutItem
                 {
                     PlayoutId = playoutBuilderState.PlayoutId,
-                    MediaItemId = mediaItem.Id,
+                    MediaItemId = IdForMediaItem(mediaItem),
                     Start = nextState.CurrentTime.UtcDateTime,
-                    Finish = nextItemStart.UtcDateTime,
-                    InPoint = TimeSpan.Zero,
-                    OutPoint = TimeSpan.Zero,
+                    Finish = nextState.CurrentTime.Add(duration).UtcDateTime,
+                    InPoint = inPoint,
+                    OutPoint = inPoint + duration,
                     GuideGroup = nextState.NextGuideGroup,
                     FillerKind = FillerKind.Fallback,
                     DisableWatermarks = !scheduleItem.FallbackFiller.AllowWatermarks,
+                    ChapterTitle = ChapterTitleForMediaItem(mediaItem),
                     SchedulingContext = GetSchedulingContext(scheduleItem, scheduleItem.FallbackFillerId, enumerator)
                 };
 
@@ -230,7 +267,7 @@ public abstract class PlayoutModeSchedulerBase<T>(ILogger logger) : IPlayoutMode
 
                 nextState = nextState with
                 {
-                    CurrentTime = nextItemStart.UtcDateTime
+                    CurrentTime = nextState.CurrentTime.Add(duration)
                 };
 
                 enumerator.MoveNext(playoutItem.StartOffset);
@@ -704,14 +741,14 @@ public abstract class PlayoutModeSchedulerBase<T>(ILogger logger) : IPlayoutMode
                                         ? leftOverall
                                         : leftInThisBreak;
 
-                                    Option<PlayoutItem> maybeFallback = FallbackFillerForPad(
+                                    List<PlayoutItem> fallbackItems = FallbackFillerForPad(
                                         playoutBuilderState,
                                         enumerators,
                                         scheduleItem,
                                         i < filteredChapters.Count - 1 ? maxThisBreak : leftOverall,
                                         cancellationToken);
 
-                                    foreach (PlayoutItem fallback in maybeFallback)
+                                    foreach (PlayoutItem fallback in fallbackItems)
                                     {
                                         current += fallback.Finish - fallback.Start;
                                         filled += fallback.Finish - fallback.Start;
@@ -864,41 +901,61 @@ public abstract class PlayoutModeSchedulerBase<T>(ILogger logger) : IPlayoutMode
         return result;
     }
 
-    private static Option<PlayoutItem> FallbackFillerForPad(
+    private static List<PlayoutItem> FallbackFillerForPad(
         PlayoutBuilderState playoutBuilderState,
         Dictionary<CollectionKey, IMediaCollectionEnumerator> enumerators,
         ProgramScheduleItem scheduleItem,
         TimeSpan duration,
         CancellationToken cancellationToken)
     {
+        var result = new List<PlayoutItem>();
+
         if (scheduleItem.FallbackFiller != null)
         {
             IMediaCollectionEnumerator enumerator =
                 enumerators[CollectionKey.ForFillerPreset(scheduleItem.FallbackFiller)];
 
-            foreach (MediaItem mediaItem in enumerator.Current)
+            TimeSpan remainingToFill = duration;
+            DateTimeOffset currentTime = new DateTimeOffset(2020, 2, 1, 0, 0, 0, TimeSpan.Zero);
+
+            while (enumerator.Current.IsSome && remainingToFill > TimeSpan.Zero)
             {
-                var result = new PlayoutItem
+                MediaItem mediaItem = enumerator.Current.ValueUnsafe();
+                TimeSpan itemDuration = mediaItem.GetDurationForPlayout();
+
+                if (itemDuration <= TimeSpan.Zero)
+                {
+                    break;
+                }
+
+                TimeSpan currentDuration = itemDuration < remainingToFill ? itemDuration : remainingToFill;
+                TimeSpan inPoint = InPointForMediaItem(mediaItem);
+
+                var playoutItem = new PlayoutItem
                 {
                     PlayoutId = playoutBuilderState.PlayoutId,
-                    MediaItemId = mediaItem.Id,
-                    Start = new DateTime(2020, 2, 1, 0, 0, 0, DateTimeKind.Utc),
-                    Finish = new DateTime(2020, 2, 1, 0, 0, 0, DateTimeKind.Utc) + duration,
-                    InPoint = TimeSpan.Zero,
-                    OutPoint = TimeSpan.Zero,
+                    MediaItemId = IdForMediaItem(mediaItem),
+                    Start = currentTime.UtcDateTime,
+                    Finish = currentTime.Add(currentDuration).UtcDateTime,
+                    InPoint = inPoint,
+                    OutPoint = inPoint + currentDuration,
                     GuideGroup = playoutBuilderState.NextGuideGroup,
                     FillerKind = FillerKind.Fallback,
-                    DisableWatermarks = !scheduleItem.FallbackFiller.AllowWatermarks
+                    DisableWatermarks = !scheduleItem.FallbackFiller.AllowWatermarks,
+                    ChapterTitle = ChapterTitleForMediaItem(mediaItem)
                 };
+
+                result.Add(playoutItem);
+
+                remainingToFill -= currentDuration;
+                currentTime += currentDuration;
 
                 // TODO: this won't work with reruns
                 enumerator.MoveNext(Option<DateTimeOffset>.None);
-
-                return result;
             }
         }
 
-        return None;
+        return result;
     }
 
     private List<PlayoutItem> AddRandomCountFiller(

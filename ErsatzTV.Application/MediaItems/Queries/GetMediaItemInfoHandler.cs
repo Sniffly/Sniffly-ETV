@@ -171,6 +171,9 @@ public class GetMediaItemInfoHandler : IRequestHandler<GetMediaItemInfo, Either<
             mediaStream.ColorSpace,
             mediaStream.ColorTransfer,
             mediaStream.ColorPrimaries,
+            mediaStream.DvProfile,
+            mediaStream.MediaStreamKind is MediaStreamKind.Video ? mediaStream.HasHdr10Metadata : null,
+            mediaStream.Rotation,
             mediaStream.BitsPerRawSample > 0 ? mediaStream.BitsPerRawSample : null,
             mediaStream.MimeType) { FileName = mediaStream.FileName };
 
@@ -185,6 +188,9 @@ public class GetMediaItemInfoHandler : IRequestHandler<GetMediaItemInfo, Either<
             null,
             subtitle.Default ? true : null,
             subtitle.Forced ? true : null,
+            null,
+            null,
+            null,
             null,
             null,
             null,

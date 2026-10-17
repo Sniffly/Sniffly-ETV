@@ -280,7 +280,7 @@ public class EmbyMovieRepository : IEmbyMovieRepository
         // tags
         foreach (Tag tag in metadata.Tags
                      .Filter(g => incomingMetadata.Tags.All(g2 => g2.Name != g.Name))
-                     .Filter(g => g.ExternalCollectionId is null)
+                     .Filter(g => g.ExternalCollectionId is null && g.ExternalTypeId is null)
                      .ToList())
         {
             metadata.Tags.Remove(tag);
@@ -316,6 +316,7 @@ public class EmbyMovieRepository : IEmbyMovieRepository
                      .ToList())
         {
             metadata.Actors.Remove(actor);
+            dbContext.Actors.Remove(actor);
         }
 
         foreach (Actor actor in incomingMetadata.Actors

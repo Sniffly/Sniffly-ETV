@@ -1,5 +1,4 @@
 using System.Buffers;
-using System.Globalization;
 using System.IO.Pipelines;
 using CliWrap;
 using ErsatzTV.Core;
@@ -7,6 +6,7 @@ using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Graphics;
 using ErsatzTV.Core.Interfaces.Metadata;
 using ErsatzTV.Core.Interfaces.Streaming;
+using ErsatzTV.FFmpeg;
 using Microsoft.Extensions.Logging;
 using SkiaSharp;
 
@@ -15,6 +15,7 @@ namespace ErsatzTV.Infrastructure.Streaming.Graphics;
 public class MotionElement(
     MotionGraphicsElement motionElement,
     Option<string> ffprobePath,
+    Option<string> ffmpegPath,
     ILocalStatisticsProvider localStatisticsProvider,
     ILogger logger)
     : GraphicsElement, IDisposable
@@ -22,9 +23,10 @@ public class MotionElement(
     private CancellationTokenSource _cancellationTokenSource;
     private CommandTask<CommandResult> _commandTask;
     private int _frameSize;
+    private long _framesToSkip;
+    private bool _hasFrame;
     private PipeReader _pipeReader;
     private SKPointI _point;
-    private SKBitmap _canvasBitmap;
     private SKBitmap _motionFrameBitmap;
     private TimeSpan _startTime;
     private TimeSpan _endTime;
@@ -54,7 +56,6 @@ public class MotionElement(
 
         _cancellationTokenSource?.Dispose();
 
-        _canvasBitmap?.Dispose();
         _motionFrameBitmap?.Dispose();
     }
 
@@ -67,7 +68,7 @@ public class MotionElement(
             ProbeResult probeResult = await ProbeMotionElement(context.FrameSize);
             var overlayDuration = motionElement.EndBehavior switch
             {
-                MotionEndBehavior.Loop => context.Seek + context.Duration,
+                MotionEndBehavior.Loop => context.Seek + context.Duration - _startTime,
                 MotionEndBehavior.Hold => probeResult.Duration + holdDuration,
                 _ => probeResult.Duration
             };
@@ -75,7 +76,7 @@ public class MotionElement(
             _endTime = _startTime + overlayDuration;
 
             // already past the time when this is supposed to play; don't do any more work
-            if (_startTime + overlayDuration < context.Seek)
+            if (_endTime <= context.Seek || _startTime >= context.Seek + context.Duration)
             {
                 IsFinished = true;
                 return;
@@ -88,6 +89,23 @@ public class MotionElement(
             if (_startTime < context.Seek)
             {
                 overlaySeekTime = context.Seek - _startTime;
+            }
+
+            if (motionElement.EndBehavior is MotionEndBehavior.Hold)
+            {
+                // seek over the prefix, but leave a second at EOF to recover the final
+                // frame reliably. seeking too close to EOF can produce no frames.
+                TimeSpan latestSeek = probeResult.Duration > TimeSpan.FromSeconds(1)
+                    ? probeResult.Duration - TimeSpan.FromSeconds(1)
+                    : TimeSpan.Zero;
+                TimeSpan inputSeek = overlaySeekTime < latestSeek ? overlaySeekTime : latestSeek;
+                _framesToSkip = (long)((overlaySeekTime - inputSeek).TotalSeconds *
+                    context.FrameRate.ParsedFrameRate);
+                overlaySeekTime = inputSeek;
+            }
+            else if (motionElement.EndBehavior is MotionEndBehavior.Loop && probeResult.Duration > TimeSpan.Zero)
+            {
+                overlaySeekTime = TimeSpan.FromTicks(overlaySeekTime.Ticks % probeResult.Duration.Ticks);
             }
 
             Resolution sourceSize = probeResult.Size;
@@ -117,12 +135,6 @@ public class MotionElement(
             var targetSize = new Resolution { Width = scaledWidth, Height = scaledHeight };
 
             _frameSize = targetSize.Width * targetSize.Height * 4;
-
-            _canvasBitmap = new SKBitmap(
-                context.FrameSize.Width,
-                context.FrameSize.Height,
-                SKColorType.Bgra8888,
-                SKAlphaType.Unpremul);
 
             _motionFrameBitmap = new SKBitmap(
                 targetSize.Width,
@@ -158,15 +170,21 @@ public class MotionElement(
                 arguments.AddRange(["-c:v", decoder]);
             }
 
-            if (overlaySeekTime > TimeSpan.Zero)
+            if (overlaySeekTime > TimeSpan.Zero && motionElement.EndBehavior is not MotionEndBehavior.Loop)
             {
-                arguments.AddRange(["-ss", overlaySeekTime.TotalSeconds.ToString(CultureInfo.InvariantCulture)]);
+                arguments.AddRange(["-ss", FFmpegFormatter.Milliseconds(overlaySeekTime)]);
             }
 
             arguments.AddRange(
             [
                 "-i", motionElement.VideoPath,
             ]);
+
+            // output seeking preserves the complete source on subsequent loop iterations.
+            if (overlaySeekTime > TimeSpan.Zero && motionElement.EndBehavior is MotionEndBehavior.Loop)
+            {
+                arguments.AddRange(["-ss", FFmpegFormatter.Milliseconds(overlaySeekTime)]);
+            }
 
             var videoFilter = $"fps={context.FrameRate.RFrameRate}";
             if (motionElement.Scale)
@@ -178,9 +196,8 @@ public class MotionElement(
 
             if (motionElement.EndBehavior is MotionEndBehavior.Loop)
             {
-                arguments.AddRange(
-                    "-t",
-                    $"{(int)context.Duration.TotalHours:00}:{context.Duration:mm}:{context.Duration:ss\\.fffffff}");
+                TimeSpan playbackStart = context.Seek > _startTime ? context.Seek : _startTime;
+                arguments.AddRange(["-t", FFmpegFormatter.Milliseconds(_endTime - playbackStart)]);
             }
 
             arguments.AddRange(
@@ -193,12 +210,12 @@ public class MotionElement(
 
             _state = MotionElementState.PlayingIn;
 
-            Command command = Cli.Wrap("ffmpeg")
+            Command command = Cli.Wrap(await ffmpegPath.IfNoneAsync("ffmpeg"))
                 .WithArguments(arguments)
                 .WithWorkingDirectory(FileSystemLayout.TempFilePoolFolder)
                 .WithStandardOutputPipe(PipeTarget.ToStream(pipe.Writer.AsStream()));
 
-            //logger.LogDebug("ffmpeg motion element arguments {FFmpegArguments}", command.Arguments);
+            logger.LogDebug("ffmpeg motion element arguments {FFmpegArguments}", command.Arguments);
 
             _cancellationTokenSource = new CancellationTokenSource();
             var linkedToken = CancellationTokenSource.CreateLinkedTokenSource(
@@ -225,20 +242,21 @@ public class MotionElement(
     {
         try
         {
-            if (_state is MotionElementState.Finished || contentTime < _startTime)
+            if (IsFinished || _state is MotionElementState.Finished || contentTime < _startTime)
             {
+                return Option<PreparedElementImage>.None;
+            }
+
+            if (contentTime >= _endTime)
+            {
+                IsFinished = true;
+                _state = MotionElementState.Finished;
                 return Option<PreparedElementImage>.None;
             }
 
             if (_state is MotionElementState.Holding)
             {
-                if (contentTime <= _endTime)
-                {
-                    return new PreparedElementImage(_canvasBitmap, SKPointI.Empty, 1.0f, ZIndex, false);
-                }
-
-                _state = MotionElementState.Finished;
-                return Option<PreparedElementImage>.None;
+                return new PreparedElementImage(_motionFrameBitmap, _point, 1.0f, ZIndex, false);
             }
 
             while (true)
@@ -259,31 +277,33 @@ public class MotionElement(
                             sequence.CopyTo(pixmap.GetPixelSpan());
                         }
 
-                        _canvasBitmap.Erase(SKColors.Transparent);
-
-                        using (var canvas = new SKCanvas(_canvasBitmap))
-                        {
-                            canvas.DrawBitmap(_motionFrameBitmap, _point);
-                        }
-
                         // mark this frame as consumed
                         consumed = sequence.End;
+                        examined = consumed;
+                        _hasFrame = true;
+
+                        if (_framesToSkip > 0)
+                        {
+                            _framesToSkip--;
+                            continue;
+                        }
 
                         // we are done, return the frame
-                        return new PreparedElementImage(_canvasBitmap, SKPointI.Empty, 1.0f, ZIndex, false);
+                        return new PreparedElementImage(_motionFrameBitmap, _point, 1.0f, ZIndex, false);
                     }
 
                     if (readResult.IsCompleted)
                     {
                         await _pipeReader.CompleteAsync();
 
-                        if (motionElement.EndBehavior is MotionEndBehavior.Hold)
+                        if (motionElement.EndBehavior is MotionEndBehavior.Hold && _hasFrame)
                         {
                             _state = MotionElementState.Holding;
-                            return new PreparedElementImage(_canvasBitmap, SKPointI.Empty, 1.0f, ZIndex, false);
+                            return new PreparedElementImage(_motionFrameBitmap, _point, 1.0f, ZIndex, false);
                         }
                         else
                         {
+                            IsFinished = true;
                             _state = MotionElementState.Finished;
                         }
 
@@ -294,7 +314,7 @@ public class MotionElement(
                 {
                     if (_state is not (MotionElementState.Finished or MotionElementState.Holding))
                     {
-                        // advance the reader, consuming the processed frame and examining the entire buffer
+                        // leave unread frames available without waiting for more data
                         _pipeReader.AdvanceTo(consumed, examined);
                     }
                 }

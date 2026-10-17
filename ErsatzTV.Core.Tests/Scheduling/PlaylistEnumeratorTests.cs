@@ -1,5 +1,6 @@
 using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Interfaces.Repositories;
+using ErsatzTV.Core.Interfaces.Scheduling;
 using ErsatzTV.Core.Scheduling;
 using NSubstitute;
 using NUnit.Framework;
@@ -62,6 +63,7 @@ public class PlaylistEnumeratorTests
             new CollectionEnumeratorState(),
             shufflePlaylistItems: false,
             batchSize: Option<int>.None,
+            randomStartPoint: false,
             CancellationToken.None);
 
         var items = new List<int>();
@@ -130,6 +132,7 @@ public class PlaylistEnumeratorTests
             new CollectionEnumeratorState(),
             shufflePlaylistItems: false,
             batchSize: Option<int>.None,
+            randomStartPoint: false,
             CancellationToken.None);
 
         var items = new List<int>();
@@ -200,6 +203,7 @@ public class PlaylistEnumeratorTests
             state,
             shufflePlaylistItems: true,
             batchSize: Option<int>.None,
+            randomStartPoint: false,
             CancellationToken.None);
 
         var items = new List<int>();
@@ -270,6 +274,7 @@ public class PlaylistEnumeratorTests
             state,
             shufflePlaylistItems: true,
             batchSize: Option<int>.None,
+            randomStartPoint: false,
             CancellationToken.None);
 
         var items = new List<int>();
@@ -352,10 +357,301 @@ public class PlaylistEnumeratorTests
             state,
             shufflePlaylistItems: true,
             batchSize: Option<int>.None,
+            randomStartPoint: false,
             CancellationToken.None);
 
         enumerator.CountForFiller.ShouldBe(7);
     }
+
+    [Test]
+    public async Task RandomStartPoint_Should_Continue_After_Rebuild()
+    {
+        IMediaCollectionRepository repo = Substitute.For<IMediaCollectionRepository>();
+
+        Dictionary<PlaylistItem, List<MediaItem>> BuildMap() => new()
+        {
+            {
+                new PlaylistItem
+                {
+                    Id = 1,
+                    Index = 0,
+                    PlaybackOrder = PlaybackOrder.Chronological,
+                    PlayAll = false,
+                    CollectionType = CollectionType.Collection,
+                    CollectionId = 1
+                },
+                [FakeMovie(10), FakeMovie(11), FakeMovie(12), FakeMovie(13), FakeMovie(14)]
+            },
+            {
+                new PlaylistItem
+                {
+                    Id = 2,
+                    Index = 1,
+                    PlaybackOrder = PlaybackOrder.Chronological,
+                    PlayAll = false,
+                    CollectionType = CollectionType.Collection,
+                    CollectionId = 2
+                },
+                [FakeMovie(15), FakeMovie(16), FakeMovie(17), FakeMovie(18), FakeMovie(19)]
+            },
+            {
+                new PlaylistItem
+                {
+                    Id = 3,
+                    Index = 2,
+                    PlaybackOrder = PlaybackOrder.Chronological,
+                    PlayAll = false,
+                    CollectionType = CollectionType.Collection,
+                    CollectionId = 3
+                },
+                [FakeMovie(20), FakeMovie(21), FakeMovie(22), FakeMovie(23), FakeMovie(24)]
+            }
+        };
+
+        const int SEED = 987654321;
+
+        // day 1: fresh build with a random start point
+        PlaylistEnumerator day1 = await PlaylistEnumerator.Create(
+            repo,
+            BuildMap(),
+            new CollectionEnumeratorState { Seed = SEED, Index = 0 },
+            shufflePlaylistItems: false,
+            batchSize: Option<int>.None,
+            randomStartPoint: true,
+            CancellationToken.None);
+
+        // capture a reference sequence and the state we would persist halfway through
+        var reference = new List<int>();
+        CollectionEnumeratorState persistedState = null;
+        for (var i = 0; i < 12; i++)
+        {
+            reference.AddRange(day1.Current.Map(mi => mi.Id));
+            day1.MoveNext(Option<DateTimeOffset>.None);
+            if (i == 5)
+            {
+                persistedState = day1.State.Clone();
+            }
+        }
+
+        // sanity: the random start point actually moved us off the natural start
+        reference.First().ShouldNotBe(10);
+        persistedState.Started.ShouldBeTrue();
+
+        // day 2: rebuild from the persisted state; the offsets must be reproduced so we continue
+        PlaylistEnumerator day2 = await PlaylistEnumerator.Create(
+            repo,
+            BuildMap(),
+            persistedState,
+            shufflePlaylistItems: false,
+            batchSize: Option<int>.None,
+            randomStartPoint: true,
+            CancellationToken.None);
+
+        var continued = new List<int>();
+        for (var i = 0; i < 6; i++)
+        {
+            continued.AddRange(day2.Current.Map(mi => mi.Id));
+            day2.MoveNext(Option<DateTimeOffset>.None);
+        }
+
+        // day 2 must pick up exactly where day 1 left off, not reset toward the start
+        continued.ShouldBe(reference.Skip(6).Take(6));
+    }
+
+    // a rebuild only has the persisted seed and index, so a shuffle that depends on anything else
+    // diverges from the playout the previous build was part way through
+    [Test]
+    public async Task Shuffled_Playlist_Should_Resume_The_Same_Way_After_A_Cycle()
+    {
+        IMediaCollectionRepository repo = Substitute.For<IMediaCollectionRepository>();
+
+        // single-item entries, so each move names its own playlist item
+        Dictionary<PlaylistItem, List<MediaItem>> BuildMap() =>
+            Range(1, 4).ToDictionary(
+                i => new PlaylistItem
+                {
+                    Id = i,
+                    Index = i - 1,
+                    PlaybackOrder = PlaybackOrder.Chronological,
+                    PlayAll = false,
+                    CollectionType = CollectionType.Collection,
+                    CollectionId = i
+                },
+                i => new List<MediaItem> { FakeMovie(i) });
+
+        const int SEED = 12345;
+
+        PlaylistEnumerator live = await PlaylistEnumerator.Create(
+            repo,
+            BuildMap(),
+            new CollectionEnumeratorState { Seed = SEED, Index = 0 },
+            shufflePlaylistItems: true,
+            batchSize: Option<int>.None,
+            randomStartPoint: false,
+            CancellationToken.None);
+
+        // past the end of the first cycle, which reseeds and reshuffles
+        for (var i = 0; i < 6; i++)
+        {
+            live.MoveNext(Option<DateTimeOffset>.None);
+        }
+
+        CollectionEnumeratorState persisted = live.State.Clone();
+        persisted.Seed.ShouldNotBe(SEED, "the cycle should have completed and reseeded");
+
+        var expected = new List<int>();
+        for (var i = 0; i < 4; i++)
+        {
+            expected.AddRange(live.Current.Map(mi => mi.Id));
+            live.MoveNext(Option<DateTimeOffset>.None);
+        }
+
+        PlaylistEnumerator rebuilt = await PlaylistEnumerator.Create(
+            repo,
+            BuildMap(),
+            persisted.Clone(),
+            shufflePlaylistItems: true,
+            batchSize: Option<int>.None,
+            randomStartPoint: false,
+            CancellationToken.None);
+
+        var continued = new List<int>();
+        for (var i = 0; i < 4; i++)
+        {
+            continued.AddRange(rebuilt.Current.Map(mi => mi.Id));
+            rebuilt.MoveNext(Option<DateTimeOffset>.None);
+        }
+
+        continued.ShouldBe(expected);
+    }
+
+    // callers use EnumeratorIndex on ChildEnumerators, and each cycle end changes the shuffled order
+    [Test]
+    public async Task ChildEnumerators_Should_Follow_The_Shuffle()
+    {
+        IMediaCollectionRepository repo = Substitute.For<IMediaCollectionRepository>();
+
+        Dictionary<PlaylistItem, List<MediaItem>> BuildMap() => new()
+        {
+            { PlaylistItemFor(1), [FakeMovie(1), FakeMovie(2)] },
+            { PlaylistItemFor(2), [FakeMovie(3), FakeMovie(4)] },
+            { PlaylistItemFor(3), [FakeMovie(5), FakeMovie(6)] },
+            { PlaylistItemFor(4), [FakeMovie(7), FakeMovie(8)] }
+        };
+
+        PlaylistEnumerator enumerator = await PlaylistEnumerator.Create(
+            repo,
+            BuildMap(),
+            new CollectionEnumeratorState { Seed = 12345, Index = 0 },
+            shufflePlaylistItems: true,
+            batchSize: Option<int>.None,
+            randomStartPoint: false,
+            CancellationToken.None);
+
+        var sawSecondCycle = false;
+
+        for (var i = 0; i < 40; i++)
+        {
+            IMediaCollectionEnumerator currentChild = enumerator.ChildEnumerators[enumerator.EnumeratorIndex]
+                .Enumerator;
+
+            currentChild.Current.Map(mi => mi.Id)
+                .ShouldBe(enumerator.Current.Map(mi => mi.Id), $"after {i} items");
+
+            enumerator.MoveNext(Option<DateTimeOffset>.None);
+            sawSecondCycle |= enumerator.State.Index == 0;
+        }
+
+        sawSecondCycle.ShouldBeTrue("the playlist should have reshuffled at least once");
+    }
+
+    // EnumeratorPlayAllCount is a record. Playlist items with one collection and equal settings
+    // compare equal, and the retry in ShufflePlaylistItems cannot end.
+    [Test]
+    public async Task Shuffled_Playlist_Of_Equal_Items_Should_Not_Hang()
+    {
+        IMediaCollectionRepository repo = Substitute.For<IMediaCollectionRepository>();
+
+        var playlistItemMap = new Dictionary<PlaylistItem, List<MediaItem>>
+        {
+            { PlaylistItemFor(1, collectionId: 1), [FakeMovie(1), FakeMovie(2)] },
+            { PlaylistItemFor(2, collectionId: 1), [FakeMovie(1), FakeMovie(2)] },
+            { PlaylistItemFor(3, collectionId: 1), [FakeMovie(1), FakeMovie(2)] }
+        };
+
+        // a token with a limit, so a fault fails the test and does not stop the test host
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        PlaylistEnumerator enumerator = await PlaylistEnumerator.Create(
+            repo,
+            playlistItemMap,
+            new CollectionEnumeratorState { Seed = 12345, Index = 0 },
+            shufflePlaylistItems: true,
+            batchSize: Option<int>.None,
+            randomStartPoint: false,
+            cts.Token);
+
+        cts.IsCancellationRequested.ShouldBeFalse("ShufflePlaylistItems did not return on its own");
+        enumerator.Current.IsSome.ShouldBeTrue();
+    }
+
+    // Create can remove every playlist item, and the callers do not check Current first
+    [Test]
+    public async Task Empty_Playlist_Should_Not_Throw()
+    {
+        IMediaCollectionRepository repo = Substitute.For<IMediaCollectionRepository>();
+
+        var playlistItemMap = new Dictionary<PlaylistItem, List<MediaItem>>
+        {
+            {
+                new PlaylistItem
+                {
+                    Id = 1,
+                    Index = 0,
+                    PlaybackOrder = PlaybackOrder.SeasonEpisode,
+                    PlayAll = false,
+                    CollectionType = CollectionType.Collection,
+                    CollectionId = 1
+                },
+                [SpecialEpisode(1), SpecialEpisode(2)]
+            }
+        };
+
+        PlaylistEnumerator enumerator = await PlaylistEnumerator.Create(
+            repo,
+            playlistItemMap,
+            new CollectionEnumeratorState { Seed = 12345, Index = 0 },
+            shufflePlaylistItems: false,
+            batchSize: Option<int>.None,
+            randomStartPoint: false,
+            CancellationToken.None);
+
+        enumerator.ChildEnumerators.ShouldBeEmpty();
+        enumerator.Current.IsNone.ShouldBeTrue();
+
+        Should.NotThrow(() => enumerator.MoveNext(Option<DateTimeOffset>.None));
+        Should.NotThrow(() => _ = enumerator.CurrentEnumeratorPlayAll);
+        Should.NotThrow(() => enumerator.SetEnumeratorIndex(0));
+    }
+
+    private static PlaylistItem PlaylistItemFor(int id, int? collectionId = null) => new()
+    {
+        Id = id,
+        Index = id - 1,
+        PlaybackOrder = PlaybackOrder.Chronological,
+        PlayAll = false,
+        CollectionType = CollectionType.Collection,
+        CollectionId = collectionId ?? id
+    };
+
+    private static Episode SpecialEpisode(int id) => new()
+    {
+        Id = id,
+        Season = new Season { Id = 1, SeasonNumber = 0 },
+        SeasonId = 1,
+        EpisodeMetadata = [new EpisodeMetadata { EpisodeNumber = id }],
+        MediaVersions = []
+    };
 
     private static Movie FakeMovie(int id) => new()
     {

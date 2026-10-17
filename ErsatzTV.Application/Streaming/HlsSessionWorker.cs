@@ -166,7 +166,8 @@ public class HlsSessionWorker : IHlsSessionWorker
 
     public void PlayoutUpdated() => _state = HlsSessionState.PlayoutUpdated;
 
-    public HlsSessionModel GetModel() => new(_channelNumber, _state.ToString(), _transcodedUntil, _lastAccess);
+    public HlsSessionModel GetModel() =>
+        new(_channelNumber, _state.ToString(), _transcodedUntil, _lastAccess, _channelStart);
 
     void IDisposable.Dispose()
     {
@@ -264,6 +265,14 @@ public class HlsSessionWorker : IHlsSessionWorker
                 }
             }
         }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("HLS worker has been canceled for channel {ChannelNumber}", _channelNumber);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception in HLS worker for channel {ChannelNumber}", _channelNumber);
+        }
         finally
         {
             if (_timer is not null)
@@ -319,13 +328,12 @@ public class HlsSessionWorker : IHlsSessionWorker
 
             _logger.LogDebug("Playlist exists");
 
-            // start the segment-wait deadline only after the playlist file appears,
-            // so slow pipeline setup (e.g. h264 profile probing) doesn't consume the budget
-            DateTimeOffset finish = DateTimeOffset.Now.AddSeconds(8);
+            // The caller owns the deadline. Only report readiness once playable segments exist.
+            int requiredSegmentCount = Math.Max(1, initialSegmentCount);
 
             var segmentCount = 0;
             int lastSegmentCount = -1;
-            while (DateTimeOffset.Now < finish && segmentCount < initialSegmentCount)
+            while (segmentCount < requiredSegmentCount)
             {
                 if (segmentCount != lastSegmentCount)
                 {
@@ -638,7 +646,7 @@ public class HlsSessionWorker : IHlsSessionWorker
                         return false;
                     }
                 }
-                catch (Exception ex) when (ex is TaskCanceledException or OperationCanceledException)
+                catch (OperationCanceledException)
                 {
                     _logger.LogInformation("Terminating HLS session for channel {Channel}", _channelNumber);
                     return false;

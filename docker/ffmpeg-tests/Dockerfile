@@ -1,4 +1,4 @@
-FROM ghcr.io/ersatztv/ersatztv-ffmpeg:7.1.1
+FROM ghcr.io/ersatztv/ersatztv-ffmpeg:8.1.2-4@sha256:ab7e476274568401238939835a2e4d98b07a8ab21c0759997743fbba85b50de7
 RUN apt-get update && apt-get install -y ca-certificates gnupg mkvtoolnix && \
     curl -L https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh && \
     chmod +x ./dotnet-install.sh && \
@@ -43,5 +43,4 @@ RUN fc-cache update
 WORKDIR /source
 ENV ETV_CONFIG_FOLDER=/config
 ENV ETV_TRANSCODE_FOLDER=/transcode
-ENV ETV_DISABLE_VULKAN=1
 ENTRYPOINT ["dotnet", "test", "-v", "quiet", "--no-build", "--tl", "--nologo", "ErsatzTV.Scanner.Tests/ErsatzTV.Scanner.Tests.csproj", "--logger", "console;verbosity=minimal", "--filter", "FullyQualifiedName=ErsatzTV.Scanner.Tests.Core.FFmpeg.TranscodingTests.Transcode"]

@@ -42,7 +42,7 @@ public class PlexServerApiClient(PlexEtag plexEtag, ILogger<PlexServerApiClient>
     {
         try
         {
-            IPlexServerApi service = RestService.For<IPlexServerApi>(
+            IPlexServerApi service = RestService.ForGenerated<IPlexServerApi>(
                 new HttpClient
                 {
                     BaseAddress = new Uri(connection.Uri),
@@ -416,7 +416,7 @@ public class PlexServerApiClient(PlexEtag plexEtag, ILogger<PlexServerApiClient>
     {
         try
         {
-            IPlexServerApi service = RestService.For<IPlexServerApi>(
+            IPlexServerApi service = RestService.ForGenerated<IPlexServerApi>(
                 new HttpClient { BaseAddress = new Uri(connection.Uri) });
 
             PlexMediaContainerResponse<PlexMediaContainerHubContent<PlexHubResponse>> searchResponse =
@@ -466,7 +466,7 @@ public class PlexServerApiClient(PlexEtag plexEtag, ILogger<PlexServerApiClient>
 
         const int PAGE_SIZE = 10;
 
-        IPlexServerApi jsonService = RestService.For<IPlexServerApi>(connection.Uri);
+        IPlexServerApi jsonService = RestService.ForGenerated<IPlexServerApi>(connection.Uri);
         int pages = (size - 1) / PAGE_SIZE + 1;
 
         for (var i = 0; i < pages; i++)
@@ -490,7 +490,7 @@ public class PlexServerApiClient(PlexEtag plexEtag, ILogger<PlexServerApiClient>
 
         TimeSpan httpClientTimeout = timeout ?? TimeSpan.FromSeconds(30);
 
-        return RestService.For<IPlexServerApi>(
+        return RestService.ForGenerated<IPlexServerApi>(
             new HttpClient
             {
                 BaseAddress = new Uri(uri),
@@ -710,7 +710,12 @@ public class PlexServerApiClient(PlexEtag plexEtag, ILogger<PlexServerApiClient>
         foreach (PlexLabelResponse label in Optional(response.Label).Flatten())
         {
             metadata.Tags.Add(
-                new Tag { Name = label.Tag, ExternalCollectionId = label.Id.ToString(CultureInfo.InvariantCulture) });
+                new Tag
+                {
+                    Name = label.Tag,
+                    ExternalCollectionId = label.Id.ToString(CultureInfo.InvariantCulture),
+                    ExternalTypeId = Tag.PlexLabelTypeId
+                });
         }
 
         if (!string.IsNullOrWhiteSpace(response.Studio))
@@ -790,6 +795,16 @@ public class PlexServerApiClient(PlexEtag plexEtag, ILogger<PlexServerApiClient>
                 Chapters = Optional(response.Chapters).Flatten().Map(ProjectToModel).ToList()
             };
 
+            // orientation is omitted when content should not be rotated
+            // plex seems to return "inverted" exif values
+            int rotation = videoStream.Orientation switch
+            {
+                8 => 270,
+                3 => 180,
+                6 => 90,
+                _ => 0
+            };
+
             version.Streams.Add(
                 new MediaStream
                 {
@@ -805,7 +820,8 @@ public class PlexServerApiClient(PlexEtag plexEtag, ILogger<PlexServerApiClient>
                     ColorRange = (videoStream.ColorRange ?? string.Empty).ToLowerInvariant(),
                     ColorSpace = (videoStream.ColorSpace ?? string.Empty).ToLowerInvariant(),
                     ColorTransfer = (videoStream.ColorTrc ?? string.Empty).ToLowerInvariant(),
-                    ColorPrimaries = (videoStream.ColorPrimaries ?? string.Empty).ToLowerInvariant()
+                    ColorPrimaries = (videoStream.ColorPrimaries ?? string.Empty).ToLowerInvariant(),
+                    Rotation = rotation
                 });
 
             foreach (PlexStreamResponse audioStream in streams.Filter(s => s.StreamType == 2 && s.Index.HasValue))
@@ -839,7 +855,8 @@ public class PlexServerApiClient(PlexEtag plexEtag, ILogger<PlexServerApiClient>
                     Codec = subtitleStream.Codec,
                     Default = subtitleStream.Default,
                     Forced = subtitleStream.Forced,
-                    Language = subtitleStream.LanguageCode
+                    Language = subtitleStream.LanguageCode,
+                    Title = subtitleStream.Title
                 };
 
                 version.Streams.Add(stream);
@@ -861,7 +878,9 @@ public class PlexServerApiClient(PlexEtag plexEtag, ILogger<PlexServerApiClient>
                     Codec = subtitleStream.Codec,
                     Default = subtitleStream.Default,
                     Forced = subtitleStream.Forced,
-                    Language = subtitleStream.LanguageCode
+                    Language = subtitleStream.LanguageCode,
+
+                    Title = subtitleStream.Title
                 };
 
                 version.Streams.Add(stream);
@@ -937,7 +956,12 @@ public class PlexServerApiClient(PlexEtag plexEtag, ILogger<PlexServerApiClient>
         foreach (PlexLabelResponse label in Optional(response.Label).Flatten())
         {
             metadata.Tags.Add(
-                new Tag { Name = label.Tag, ExternalCollectionId = label.Id.ToString(CultureInfo.InvariantCulture) });
+                new Tag
+                {
+                    Name = label.Tag,
+                    ExternalCollectionId = label.Id.ToString(CultureInfo.InvariantCulture),
+                    ExternalTypeId = Tag.PlexLabelTypeId
+                });
         }
 
         if (DateTime.TryParse(response.OriginallyAvailableAt, out DateTime releaseDate))
@@ -1298,40 +1322,14 @@ public class PlexServerApiClient(PlexEtag plexEtag, ILogger<PlexServerApiClient>
                 .MaxBy(media => media.Id);
 
             PlexXmlPartResponse part = media.Part.Head();
-            string folder = Path.GetDirectoryName(part.File);
+            IEnumerable<string> libraryPaths = library.Paths
+                .HeadOrNone()
+                .Map(p => p.Path)
+                .Map(JsonConvert.DeserializeObject<LibraryPaths>)
+                .Map(lp => lp.Paths)
+                .Flatten();
 
-            if (!string.IsNullOrWhiteSpace(folder))
-            {
-                IEnumerable<string> libraryPaths = library.Paths
-                    .HeadOrNone()
-                    .Map(p => p.Path)
-                    .Map(JsonConvert.DeserializeObject<LibraryPaths>)
-                    .Map(lp => lp.Paths)
-                    .Flatten();
-
-                // check each library path from plex
-                foreach (string libraryPath in libraryPaths)
-                {
-                    // if the media file belongs to this library path
-                    if (folder.StartsWith(libraryPath, StringComparison.OrdinalIgnoreCase))
-                    {
-                        // try to get a parent directory of the library path
-                        string parent = Optional(Directory.GetParent(libraryPath)).Match(
-                            di => di.FullName,
-                            () => libraryPath);
-
-                        // get all folders between parent and media file
-                        string diff = Path.GetRelativePath(parent, folder);
-
-                        // each folder becomes a tag
-                        IEnumerable<Tag> tags = diff.Split(Path.DirectorySeparatorChar)
-                            .Map(t => new Tag { Name = t });
-
-                        metadata.Tags.AddRange(tags);
-                        break;
-                    }
-                }
-            }
+            metadata.Tags.AddRange(GetFolderTags(part.File, libraryPaths).Map(t => new Tag { Name = t }));
         }
         else
         {
@@ -1341,7 +1339,12 @@ public class PlexServerApiClient(PlexEtag plexEtag, ILogger<PlexServerApiClient>
         foreach (PlexLabelResponse label in Optional(response.Label).Flatten())
         {
             metadata.Tags.Add(
-                new Tag { Name = label.Tag, ExternalCollectionId = label.Id.ToString(CultureInfo.InvariantCulture) });
+                new Tag
+                {
+                    Name = label.Tag,
+                    ExternalCollectionId = label.Id.ToString(CultureInfo.InvariantCulture),
+                    ExternalTypeId = Tag.PlexLabelTypeId
+                });
         }
 
         if (!string.IsNullOrWhiteSpace(response.Studio))
@@ -1385,6 +1388,44 @@ public class PlexServerApiClient(PlexEtag plexEtag, ILogger<PlexServerApiClient>
         }
 
         return metadata;
+    }
+
+    internal static IEnumerable<string> GetFolderTags(string file, IEnumerable<string> libraryPaths)
+    {
+        if (string.IsNullOrWhiteSpace(file))
+        {
+            return [];
+        }
+
+        // plex paths belong to the server, so do not interpret them with host path apis
+        string normalizedFile = file.Replace('\\', '/');
+        int separator = normalizedFile.LastIndexOf('/');
+        if (separator < 0)
+        {
+            return [];
+        }
+
+        string folder = normalizedFile[..separator];
+        foreach (string libraryPath in libraryPaths)
+        {
+            if (string.IsNullOrWhiteSpace(libraryPath))
+            {
+                continue;
+            }
+
+            string root = libraryPath.Replace('\\', '/').TrimEnd('/');
+            if (!folder.Equals(root, StringComparison.OrdinalIgnoreCase) &&
+                !folder.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            // include the library folder itself; never a filesystem root or drive name
+            int start = root.Length == 2 && root[1] == ':' ? root.Length : root.LastIndexOf('/') + 1;
+            return folder[start..].Split('/', StringSplitOptions.RemoveEmptyEntries);
+        }
+
+        return [];
     }
 
     private Option<string> NormalizeGuid(string guid)

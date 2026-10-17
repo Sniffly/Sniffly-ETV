@@ -27,6 +27,7 @@ using ErsatzTV.FFmpeg.State;
 using ErsatzTV.Infrastructure.Images;
 using ErsatzTV.Infrastructure.Metadata;
 using ErsatzTV.Infrastructure.Runtime;
+using ErsatzTV.Infrastructure.Streaming.Graphics;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using NSubstitute;
@@ -270,6 +271,7 @@ public class TranscodingTests
                 Arg.Any<List<PlayoutItemGraphicsElement>>(),
                 Arg.Any<CancellationToken>())
             .Returns(callInfo => Task.FromResult(callInfo.Arg<GraphicsEngineContext>()));
+        var graphicsEngineContextFactory = new GraphicsEngineContextFactory(graphicsElementLoader);
 
         var oldService = new FFmpegProcessService(
             new FakeStreamSelector(),
@@ -289,7 +291,7 @@ public class TranscodingTests
                     LoggerFactory.CreateLogger<HardwareCapabilitiesFactory>()),
                 LoggerFactory.CreateLogger<PipelineBuilderFactory>()),
             Substitute.For<IConfigElementRepository>(),
-            graphicsElementLoader,
+            graphicsEngineContextFactory,
             MemoryCache,
             Substitute.For<IMpegTsScriptService>(),
             Substitute.For<ILocalStatisticsProvider>(),
@@ -342,19 +344,20 @@ public class TranscodingTests
             channel,
             ExecutableName("ffmpeg"),
             ExecutableName("ffprobe"),
+            seed: null,
             CancellationToken.None);
 
         IMetadataRepository metadataRepository = Substitute.For<IMetadataRepository>();
         metadataRepository.When(x => x.UpdateStatistics(Arg.Any<MediaItem>(), Arg.Any<MediaVersion>(), Arg.Any<bool>()))
             .Do(x =>
             {
-                MediaVersion version = x.Arg<MediaVersion>();
-                if (version.Streams.Any(s => s.MediaStreamKind == MediaStreamKind.Video && !s.AttachedPic))
+                MediaVersion? version = x.Arg<MediaVersion>();
+                if (version != null && version.Streams.Any(s => s.MediaStreamKind == MediaStreamKind.Video && !s.AttachedPic))
                 {
                     version.MediaFiles = videoVersion.MediaFiles;
                     videoVersion = version;
                 }
-                else
+                else if (version != null)
                 {
                     version.MediaFiles = songVersion.MediaFiles;
                     songVersion = version;
@@ -375,13 +378,13 @@ public class TranscodingTests
         WatermarkSelector watermarkSelector = new WatermarkSelector(
             new MockFileSystem(),
             mockImageCache,
-            new DecoSelector(LoggerFactory.CreateLogger<DecoSelector>()),
+            new DecoSelector(),
             LoggerFactory.CreateLogger<WatermarkSelector>());
 
         List<WatermarkOptions> watermarks = [];
         foreach (var wm in GetWatermark(watermark))
         {
-            watermarks.AddRange(watermarkSelector.GetWatermarkOptions(channel, wm, Option<ChannelWatermark>.None));
+            watermarks.AddRange(watermarkSelector.GetWatermarkOptions(channel, wm, Option<ChannelWatermark>.None, shouldLogMessages: true));
         }
 
         PlayoutItemResult playoutItemResult = await service.ForPlayoutItem(
@@ -520,8 +523,11 @@ public class TranscodingTests
             .Do(args =>
             {
                 MediaVersion? version = args.Arg<MediaVersion>();
-                version.MediaFiles = v.MediaFiles;
-                v = version;
+                if (version != null)
+                {
+                    version.MediaFiles = v.MediaFiles;
+                    v = version;
+                }
             });
 
         var localStatisticsProvider = new LocalStatisticsProvider(
@@ -707,13 +713,13 @@ public class TranscodingTests
         WatermarkSelector watermarkSelector = new WatermarkSelector(
             new RealFileSystem(),
             mockImageCache,
-            new DecoSelector(LoggerFactory.CreateLogger<DecoSelector>()),
+            new DecoSelector(),
             LoggerFactory.CreateLogger<WatermarkSelector>());
 
         List<WatermarkOptions> watermarks = [];
         foreach (var wm in channelWatermark)
         {
-            watermarks.AddRange(watermarkSelector.GetWatermarkOptions(channel, wm, Option<ChannelWatermark>.None));
+            watermarks.AddRange(watermarkSelector.GetWatermarkOptions(channel, wm, Option<ChannelWatermark>.None, shouldLogMessages: true));
         }
 
         var mediaItem = new OtherVideo { MediaVersions = [v] };
@@ -968,10 +974,9 @@ public class TranscodingTests
             return string.Empty;
         }
 
-        using var sha = SHA256.Create();
         byte[] textData = Encoding.UTF8.GetBytes(text);
-        byte[] hash = sha.ComputeHash(textData);
-        return BitConverter.ToString(hash).Replace("-", string.Empty);
+        byte[] hash = SHA256.HashData(textData);
+        return Convert.ToHexString(hash);
     }
 
     private static FFmpegLibraryProcessService GetService()
@@ -997,6 +1002,7 @@ public class TranscodingTests
                 Arg.Any<List<PlayoutItemGraphicsElement>>(),
                 Arg.Any<CancellationToken>())
             .Returns(callInfo => Task.FromResult(callInfo.Arg<GraphicsEngineContext>()));
+        var graphicsEngineContextFactory = new GraphicsEngineContextFactory(graphicsElementLoader);
 
         var oldService = new FFmpegProcessService(
             new FakeStreamSelector(),
@@ -1016,7 +1022,7 @@ public class TranscodingTests
                     LoggerFactory.CreateLogger<HardwareCapabilitiesFactory>()),
                 LoggerFactory.CreateLogger<PipelineBuilderFactory>()),
             Substitute.For<IConfigElementRepository>(),
-            graphicsElementLoader,
+            graphicsEngineContextFactory,
             MemoryCache,
             Substitute.For<IMpegTsScriptService>(),
             Substitute.For<ILocalStatisticsProvider>(),
@@ -1186,6 +1192,7 @@ public class TranscodingTests
             Channel channel,
             string preferredAudioLanguage,
             string preferredAudioTitle,
+            bool shouldLogMessages,
             CancellationToken cancellationToken) =>
             Optional(version.MediaVersion.Streams.FirstOrDefault(s => s.MediaStreamKind == MediaStreamKind.Audio))
                 .AsTask();
@@ -1195,6 +1202,7 @@ public class TranscodingTests
             Channel channel,
             string preferredSubtitleLanguage,
             ChannelSubtitleMode subtitleMode,
+            bool shouldLogMessages,
             CancellationToken cancellationToken) =>
             subtitles.HeadOrNone().AsTask();
     }

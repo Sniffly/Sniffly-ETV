@@ -1,0 +1,500 @@
+using ErsatzTV.Core.Domain;
+using ErsatzTV.Core.Scheduling.YamlScheduling;
+using ErsatzTV.Core.Scheduling.YamlScheduling.Models;
+using Newtonsoft.Json;
+using NUnit.Framework;
+using Shouldly;
+
+namespace ErsatzTV.Core.Tests.Scheduling;
+
+public static class YamlPlayoutContextTests
+{
+    [TestFixture]
+    public class PostRollPersistence
+    {
+        [TestCase(null)]
+        [TestCase("Christmas")]
+        public void Checkpoint_Should_Preserve_PostRoll(string activeSchedule)
+        {
+            var context = new YamlPlayoutContext(new Playout(), new YamlPlayoutDefinition(), 1);
+            context.SwitchToSchedule(activeSchedule);
+            context.SetPostRollSequence("idents");
+            context.InstructionIndex = 4;
+            var restored = new YamlPlayoutContext(new Playout(), new YamlPlayoutDefinition(), 1);
+            restored.Reset(new PlayoutAnchor
+            {
+                NextStart = DateTime.UtcNow,
+                Context = context.Serialize()
+            }, DateTimeOffset.UtcNow);
+            restored.GetPostRollSequence().ShouldBe(Some("idents"));
+            restored.InstructionIndex.ShouldBe(4);
+        }
+
+        [Test]
+        public void Checkpoint_Should_Preserve_Explicitly_Disabled_PostRoll()
+        {
+            var context = new YamlPlayoutContext(new Playout(), new YamlPlayoutDefinition(), 1);
+            context.SetPostRollSequence("idents");
+            context.ClearPostRollSequence();
+            var restored = new YamlPlayoutContext(new Playout(), new YamlPlayoutDefinition(), 1);
+            restored.SetPostRollSequence("stale");
+            restored.Reset(new PlayoutAnchor
+            {
+                NextStart = DateTime.UtcNow,
+                Context = context.Serialize()
+            }, DateTimeOffset.UtcNow);
+            restored.GetPostRollSequence().IsNone.ShouldBeTrue();
+        }
+
+        [Test]
+        public void Old_Checkpoint_Should_Remain_Readable_Without_Guessing_PostRoll()
+        {
+            var context = new YamlPlayoutContext(new Playout(), new YamlPlayoutDefinition(), 1);
+            context.Reset(new PlayoutAnchor
+            {
+                NextStart = DateTime.UtcNow,
+                Context = "{\"InstructionIndex\":4,\"ChannelWatermarkIds\":[]}"
+            }, DateTimeOffset.UtcNow);
+            context.InstructionIndex.ShouldBe(4);
+            context.GetPostRollSequence().IsNone.ShouldBeTrue();
+        }
+    }
+
+    [TestFixture]
+    public class GraphicsAndMidRollPersistence
+    {
+        [Test]
+        public void Checkpoint_Should_Preserve_Graphics_Elements()
+        {
+            var context = new YamlPlayoutContext(new Playout(), new YamlPlayoutDefinition(), 1);
+            context.SetGraphicsElement(7, null);
+            context.SetGraphicsElement(8, "{\"title\":\"x\"}");
+            var restored = new YamlPlayoutContext(new Playout(), new YamlPlayoutDefinition(), 1);
+            restored.Reset(new PlayoutAnchor
+            {
+                NextStart = DateTime.UtcNow,
+                Context = context.Serialize()
+            }, DateTimeOffset.UtcNow);
+            restored.GetGraphicsElements().Count.ShouldBe(2);
+            restored.GetGraphicsElements()[7].ShouldBeNull();
+            restored.GetGraphicsElements()[8].ShouldBe("{\"title\":\"x\"}");
+        }
+
+        [Test]
+        public void Checkpoint_Should_Preserve_MidRoll()
+        {
+            var context = new YamlPlayoutContext(new Playout(), new YamlPlayoutDefinition(), 1);
+            context.SetMidRollSequence(new YamlPlayoutContext.MidRollSequence("ads", "count > 1"));
+            var restored = new YamlPlayoutContext(new Playout(), new YamlPlayoutDefinition(), 1);
+            restored.Reset(new PlayoutAnchor
+            {
+                NextStart = DateTime.UtcNow,
+                Context = context.Serialize()
+            }, DateTimeOffset.UtcNow);
+            restored.GetMidRollSequence()
+                .ShouldBe(Some(new YamlPlayoutContext.MidRollSequence("ads", "count > 1")));
+        }
+
+        [Test]
+        public void Checkpoint_Should_Preserve_Cleared_Graphics_And_MidRoll()
+        {
+            var context = new YamlPlayoutContext(new Playout(), new YamlPlayoutDefinition(), 1);
+            context.SetGraphicsElement(7, null);
+            context.ClearGraphicsElements();
+            context.SetMidRollSequence(new YamlPlayoutContext.MidRollSequence("ads", "true"));
+            context.ClearMidRollSequence();
+            var restored = new YamlPlayoutContext(new Playout(), new YamlPlayoutDefinition(), 1);
+            restored.SetGraphicsElement(9, null);
+            restored.SetMidRollSequence(new YamlPlayoutContext.MidRollSequence("stale", "true"));
+            restored.Reset(new PlayoutAnchor
+            {
+                NextStart = DateTime.UtcNow,
+                Context = context.Serialize()
+            }, DateTimeOffset.UtcNow);
+            restored.GetGraphicsElements().ShouldBeEmpty();
+            restored.GetMidRollSequence().IsNone.ShouldBeTrue();
+        }
+
+        [Test]
+        public void Old_Checkpoint_Should_Remain_Readable_Without_Graphics_Or_MidRoll()
+        {
+            var context = new YamlPlayoutContext(new Playout(), new YamlPlayoutDefinition(), 1);
+            context.Reset(new PlayoutAnchor
+            {
+                NextStart = DateTime.UtcNow,
+                Context = "{\"InstructionIndex\":4,\"ChannelWatermarkIds\":[],\"PostRollSequence\":\"idents\"}"
+            }, DateTimeOffset.UtcNow);
+            context.InstructionIndex.ShouldBe(4);
+            context.GetPostRollSequence().ShouldBe(Some("idents"));
+            context.GetGraphicsElements().ShouldBeEmpty();
+            context.GetMidRollSequence().IsNone.ShouldBeTrue();
+        }
+    }
+
+    [TestFixture]
+    public class ScheduleSwitching
+    {
+        private static YamlPlayoutContext CreateContext()
+        {
+            var definition = new YamlPlayoutDefinition
+            {
+                Playout = [new YamlPlayoutInstruction()],
+                Schedules =
+                [
+                    new YamlPlayoutScheduleItem
+                    {
+                        Name = "Christmas",
+                        StartDate = "12-25",
+                        EndDate = "12-25",
+                        Playout = [new YamlPlayoutInstruction()]
+                    }
+                ]
+            };
+
+            return new YamlPlayoutContext(new Playout(), definition, 1);
+        }
+
+        [Test]
+        public void Switching_Should_Not_Leak_Graphics_Elements_Across_Lists()
+        {
+            YamlPlayoutContext context = CreateContext();
+
+            // default playout turns a graphics element on
+            context.SetGraphicsElement(1, null);
+            context.GetGraphicsElements().ShouldContainKey(1);
+
+            // crossing into the schedule should start with a clean ambient state
+            context.SwitchToSchedule("Christmas");
+            context.GetGraphicsElements().ShouldNotContainKey(1);
+
+            // the schedule can turn on the same element without throwing
+            Should.NotThrow(() => context.SetGraphicsElement(1, null));
+            context.GetGraphicsElements().ShouldContainKey(1);
+        }
+
+        [Test]
+        public void Returning_To_Default_Should_Restore_Its_Graphics_Elements()
+        {
+            YamlPlayoutContext context = CreateContext();
+
+            context.SetGraphicsElement(1, "default-vars");
+            context.SwitchToSchedule("Christmas");
+            context.SetGraphicsElement(1, "christmas-vars");
+
+            // returning to the default playout restores its ambient state
+            context.SwitchToSchedule(null);
+            context.GetGraphicsElements().ShouldContainKey(1);
+            context.GetGraphicsElements()[1].ShouldBe("default-vars");
+        }
+
+        [Test]
+        public void SetGraphicsElement_Should_Be_Idempotent()
+        {
+            YamlPlayoutContext context = CreateContext();
+
+            context.SetGraphicsElement(1, "a");
+            Should.NotThrow(() => context.SetGraphicsElement(1, "b"));
+            context.GetGraphicsElements()[1].ShouldBe("b");
+        }
+    }
+
+    [TestFixture]
+    public class SequenceOrderPersistence
+    {
+        [Test]
+        public void Restoring_Should_Keep_Shuffled_Orders_For_All_Playout_Lists()
+        {
+            YamlPlayoutDefinition savedDefinition = CreateDefinition([2, 0, 3, 1], [1, 3, 0, 2], true);
+            var savedContext = new YamlPlayoutContext(new Playout(), savedDefinition, 1)
+            {
+                InstructionIndex = 3
+            };
+            savedContext.RestoreSequenceOrders();
+
+            var anchor = new PlayoutAnchor
+            {
+                NextStart = DateTime.UtcNow,
+                Context = savedContext.Serialize()
+            };
+
+            YamlPlayoutDefinition restoredDefinition = CreateDefinition([0, 1, 2, 3], [0, 1, 2, 3], false);
+            var restoredContext = new YamlPlayoutContext(new Playout(), restoredDefinition, 1);
+            restoredContext.Reset(anchor, DateTimeOffset.Now);
+            restoredContext.RestoreSequenceOrders();
+
+            restoredDefinition.Playout.Select(i => i.Content).ShouldBe(["show-2", "show-0", "show-3", "show-1"]);
+            restoredDefinition.Schedules[0].Playout.Select(i => i.Content)
+                .ShouldBe(["show-1", "show-3", "show-0", "show-2"]);
+            restoredContext.InstructionIndex.ShouldBe(3);
+        }
+
+        [Test]
+        public void Restoring_Should_Reset_The_List_When_The_Sequence_Changed()
+        {
+            YamlPlayoutDefinition savedDefinition = CreateDefinition([2, 0, 3, 1], [0, 1, 2, 3], true, "old");
+            var savedContext = new YamlPlayoutContext(new Playout(), savedDefinition, 1)
+            {
+                InstructionIndex = 3
+            };
+            savedContext.RestoreSequenceOrders();
+            var anchor = new PlayoutAnchor
+            {
+                NextStart = DateTime.UtcNow,
+                Context = savedContext.Serialize()
+            };
+
+            YamlPlayoutDefinition restoredDefinition = CreateDefinition([0, 1, 2, 3], [0, 1, 2, 3], false, "new");
+            var restoredContext = new YamlPlayoutContext(new Playout(), restoredDefinition, 1);
+            restoredContext.Reset(anchor, DateTimeOffset.Now);
+            restoredContext.RestoreSequenceOrders();
+
+            restoredDefinition.Playout.Select(i => i.Content).ShouldBe(["show-0", "show-1", "show-2", "show-3"]);
+            restoredContext.InstructionIndex.ShouldBe(0);
+        }
+
+        [Test]
+        public void Restoring_Should_Reset_The_List_When_Its_Layout_Changed()
+        {
+            YamlPlayoutDefinition savedDefinition = CreateDefinition([2, 0, 3, 1], [0, 1, 2, 3], true);
+            var savedContext = new YamlPlayoutContext(new Playout(), savedDefinition, 1)
+            {
+                InstructionIndex = 3
+            };
+            savedContext.RestoreSequenceOrders();
+            var anchor = new PlayoutAnchor
+            {
+                NextStart = DateTime.UtcNow,
+                Context = savedContext.Serialize()
+            };
+
+            YamlPlayoutDefinition restoredDefinition = CreateDefinition([0, 1, 2, 3], [0, 1, 2, 3], false);
+            restoredDefinition.Playout.Insert(0, new YamlPlayoutInstruction { Content = "new-item" });
+            var restoredContext = new YamlPlayoutContext(new Playout(), restoredDefinition, 1);
+            restoredContext.Reset(anchor, DateTimeOffset.Now);
+            restoredContext.RestoreSequenceOrders();
+
+            restoredContext.InstructionIndex.ShouldBe(0);
+        }
+
+        [Test]
+        public void Restoring_Should_Reset_The_List_For_Partial_Sequence_Orders()
+        {
+            List<YamlPlayoutInstruction> firstGroup = CreateInstructions([1, 0], true, "fingerprint");
+            List<YamlPlayoutInstruction> secondGroup = CreateInstructions([0, 1], true, "fingerprint");
+            var savedDefinition = new YamlPlayoutDefinition
+            {
+                Playout = firstGroup.Concat(secondGroup).ToList()
+            };
+            var savedContext = new YamlPlayoutContext(new Playout(), savedDefinition, 1)
+            {
+                InstructionIndex = 2
+            };
+            savedContext.RestoreSequenceOrders();
+            YamlPlayoutContext.State savedState =
+                JsonConvert.DeserializeObject<YamlPlayoutContext.State>(savedContext.Serialize());
+            var partialOrders = new Dictionary<string, List<YamlPlayoutContext.SequenceOrder>>
+            {
+                [string.Empty] = [savedState.SequenceOrders[string.Empty][0]]
+            };
+            var anchor = new PlayoutAnchor
+            {
+                NextStart = DateTime.UtcNow,
+                Context = JsonConvert.SerializeObject(savedState with { SequenceOrders = partialOrders })
+            };
+
+            var restoredDefinition = new YamlPlayoutDefinition
+            {
+                Playout = CreateInstructions([0, 1], false, "fingerprint")
+                    .Concat(CreateInstructions([0, 1], false, "fingerprint"))
+                    .ToList()
+            };
+            var restoredContext = new YamlPlayoutContext(new Playout(), restoredDefinition, 1);
+            restoredContext.Reset(anchor, DateTimeOffset.Now);
+            restoredContext.RestoreSequenceOrders();
+
+            restoredContext.InstructionIndex.ShouldBe(0);
+        }
+
+        [Test]
+        public void Restoring_Should_Reset_Sequence_Orders_Without_A_List_Fingerprint()
+        {
+            YamlPlayoutDefinition definition = CreateDefinition([0, 1, 2, 3], [0, 1, 2, 3], false);
+            var context = new YamlPlayoutContext(new Playout(), definition, 1);
+            var incompleteState = new YamlPlayoutContext.State(
+                2,
+                1,
+                false,
+                [],
+                null,
+                SequenceOrders: new Dictionary<string, List<YamlPlayoutContext.SequenceOrder>>
+                {
+                    [string.Empty] = [new YamlPlayoutContext.SequenceOrder("shows", [2, 0, 3, 1])]
+                });
+            var anchor = new PlayoutAnchor
+            {
+                NextStart = DateTime.UtcNow,
+                Context = JsonConvert.SerializeObject(incompleteState)
+            };
+
+            context.Reset(anchor, DateTimeOffset.Now);
+            context.RestoreSequenceOrders();
+
+            context.InstructionIndex.ShouldBe(0);
+            definition.Playout.Select(i => i.Content).ShouldBe(["show-0", "show-1", "show-2", "show-3"]);
+        }
+
+        [Test]
+        public void Restoring_Should_Reset_The_List_For_Malformed_Sequence_Orders()
+        {
+            YamlPlayoutDefinition definition = CreateDefinition([0, 1, 2, 3], [0, 1, 2, 3], false);
+            var context = new YamlPlayoutContext(new Playout(), definition, 1);
+            var malformedState = new YamlPlayoutContext.State(
+                2,
+                1,
+                false,
+                [],
+                null,
+                SequenceOrders: new Dictionary<string, List<YamlPlayoutContext.SequenceOrder>>
+                {
+                    [string.Empty] = [new YamlPlayoutContext.SequenceOrder("shows", null)]
+                });
+            var anchor = new PlayoutAnchor
+            {
+                NextStart = DateTime.UtcNow,
+                Context = JsonConvert.SerializeObject(malformedState)
+            };
+
+            context.Reset(anchor, DateTimeOffset.Now);
+            Should.NotThrow(context.RestoreSequenceOrders);
+            context.InstructionIndex.ShouldBe(0);
+        }
+
+        [Test]
+        public void Restoring_Should_Accept_Anchors_Without_Sequence_Orders()
+        {
+            YamlPlayoutDefinition definition = CreateDefinition([0, 1, 2, 3], [0, 1, 2, 3], false);
+            var context = new YamlPlayoutContext(new Playout(), definition, 1);
+            var anchor = new PlayoutAnchor
+            {
+                NextStart = DateTime.UtcNow,
+                Context = "{\"InstructionIndex\":2,\"GuideGroup\":1,\"GuideGroupLocked\":false," +
+                          "\"ChannelWatermarkIds\":[],\"ScheduleIndices\":{\"\":2}}"
+            };
+
+            context.Reset(anchor, DateTimeOffset.Now);
+            Should.NotThrow(context.RestoreSequenceOrders);
+
+            definition.Playout.Select(i => i.Content).ShouldBe(["show-0", "show-1", "show-2", "show-3"]);
+            context.InstructionIndex.ShouldBe(2);
+        }
+
+        [Test]
+        public void Restoring_Should_Ignore_A_Schedule_With_No_Name()
+        {
+            YamlPlayoutDefinition savedDefinition = CreateDefinition([2, 0, 3, 1], true, (null, [1, 0]));
+            var savedContext = new YamlPlayoutContext(new Playout(), savedDefinition, 1)
+            {
+                InstructionIndex = 3
+            };
+            savedContext.RestoreSequenceOrders();
+            var anchor = new PlayoutAnchor
+            {
+                NextStart = DateTime.UtcNow,
+                Context = savedContext.Serialize()
+            };
+
+            YamlPlayoutDefinition restoredDefinition = CreateDefinition([0, 1, 2, 3], false, (null, [0, 1]));
+            var restoredContext = new YamlPlayoutContext(new Playout(), restoredDefinition, 1);
+            restoredContext.Reset(anchor, DateTimeOffset.Now);
+            restoredContext.RestoreSequenceOrders();
+
+            restoredDefinition.Playout.Select(i => i.Content).ShouldBe(["show-2", "show-0", "show-3", "show-1"]);
+            restoredContext.InstructionIndex.ShouldBe(3);
+        }
+
+        [Test]
+        public void Restoring_Should_Ignore_A_Duplicate_Schedule_Name()
+        {
+            YamlPlayoutDefinition savedDefinition =
+                CreateDefinition([0, 1, 2, 3], true, ("Christmas", [2, 0, 3, 1]), ("Christmas", [1, 0]));
+            var savedContext = new YamlPlayoutContext(new Playout(), savedDefinition, 1);
+            savedContext.RestoreSequenceOrders();
+            savedContext.SwitchToSchedule("Christmas");
+            savedContext.InstructionIndex = 3;
+            var anchor = new PlayoutAnchor
+            {
+                NextStart = DateTime.UtcNow,
+                Context = savedContext.Serialize()
+            };
+
+            YamlPlayoutDefinition restoredDefinition =
+                CreateDefinition([0, 1, 2, 3], false, ("Christmas", [0, 1, 2, 3]), ("Christmas", [0, 1]));
+            var restoredContext = new YamlPlayoutContext(new Playout(), restoredDefinition, 1);
+            restoredContext.Reset(anchor, DateTimeOffset.Now);
+            restoredContext.RestoreSequenceOrders();
+
+            restoredDefinition.Schedules[0].Playout.Select(i => i.Content)
+                .ShouldBe(["show-2", "show-0", "show-3", "show-1"]);
+            restoredContext.InstructionIndex.ShouldBe(3);
+        }
+
+        private static YamlPlayoutDefinition CreateDefinition(
+            int[] defaultOrder,
+            bool shuffled,
+            params (string Name, int[] Order)[] schedules) =>
+            new()
+            {
+                Playout = CreateInstructions(defaultOrder, shuffled, "fingerprint"),
+                Schedules = schedules
+                    .Select(s => new YamlPlayoutScheduleItem
+                    {
+                        Name = s.Name,
+                        StartDate = "12-25",
+                        EndDate = "12-25",
+                        Playout = CreateInstructions(s.Order, shuffled, "fingerprint")
+                    })
+                    .ToList()
+            };
+
+        private static YamlPlayoutDefinition CreateDefinition(
+            int[] defaultOrder,
+            int[] scheduleOrder,
+            bool shuffled,
+            string fingerprint = "fingerprint")
+        {
+            return new YamlPlayoutDefinition
+            {
+                Playout = CreateInstructions(defaultOrder, shuffled, fingerprint),
+                Schedules =
+                [
+                    new YamlPlayoutScheduleItem
+                    {
+                        Name = "Christmas",
+                        StartDate = "12-25",
+                        EndDate = "12-25",
+                        Playout = CreateInstructions(scheduleOrder, shuffled, fingerprint)
+                    }
+                ]
+            };
+        }
+
+        private static List<YamlPlayoutInstruction> CreateInstructions(
+            int[] order,
+            bool shuffled,
+            string fingerprint)
+        {
+            var sequenceGuid = Guid.NewGuid();
+            return order
+                .Select(index => new YamlPlayoutInstruction
+                {
+                    Content = $"show-{index}",
+                    SequenceKey = "shows",
+                    SequenceGuid = sequenceGuid,
+                    SequenceIndex = index,
+                    SequenceShuffled = shuffled,
+                    SequenceFingerprint = fingerprint
+                })
+                .ToList();
+        }
+    }
+}

@@ -17,7 +17,7 @@ namespace ErsatzTV.Infrastructure.MySql.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "9.0.12")
+                .HasAnnotation("ProductVersion", "9.0.15")
                 .HasAnnotation("Relational:MaxIdentifierLength", 64);
 
             MySqlModelBuilderExtensions.AutoIncrementColumns(modelBuilder);
@@ -331,6 +331,9 @@ namespace ErsatzTV.Infrastructure.MySql.Migrations
                         .HasColumnType("varchar(50)")
                         .UseCollation("utf8mb4_general_ci");
 
+                    b.Property<int>("NextEngineTextSubtitleMode")
+                        .HasColumnType("int");
+
                     b.Property<string>("Number")
                         .HasColumnType("varchar(255)");
 
@@ -370,6 +373,9 @@ namespace ErsatzTV.Infrastructure.MySql.Migrations
                         .HasColumnType("longtext");
 
                     b.Property<int>("StreamSelectorMode")
+                        .HasColumnType("int");
+
+                    b.Property<int>("StreamingEngine")
                         .HasColumnType("int");
 
                     b.Property<int>("StreamingMode")
@@ -1384,10 +1390,16 @@ namespace ErsatzTV.Infrastructure.MySql.Migrations
                     b.Property<bool>("Default")
                         .HasColumnType("tinyint(1)");
 
+                    b.Property<int?>("DvProfile")
+                        .HasColumnType("int");
+
                     b.Property<string>("FileName")
                         .HasColumnType("longtext");
 
                     b.Property<bool>("Forced")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<bool>("HasHdr10Metadata")
                         .HasColumnType("tinyint(1)");
 
                     b.Property<int>("Index")
@@ -1410,6 +1422,9 @@ namespace ErsatzTV.Infrastructure.MySql.Migrations
 
                     b.Property<string>("Profile")
                         .HasColumnType("longtext");
+
+                    b.Property<int?>("Rotation")
+                        .HasColumnType("int");
 
                     b.Property<string>("Title")
                         .HasColumnType("longtext");
@@ -3070,6 +3085,9 @@ namespace ErsatzTV.Infrastructure.MySql.Migrations
                     b.Property<int>("PlayoutId")
                         .HasColumnType("int");
 
+                    b.Property<int?>("Seed")
+                        .HasColumnType("int");
+
                     b.Property<DateTime>("When")
                         .HasColumnType("datetime(6)");
 
@@ -4107,6 +4125,9 @@ namespace ErsatzTV.Infrastructure.MySql.Migrations
                         .HasColumnType("longtext");
 
                     b.Property<DateTime?>("LastCollectionsScan")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<DateTime?>("MissingSince")
                         .HasColumnType("datetime(6)");
 
                     b.Property<string>("Platform")
@@ -5201,6 +5222,9 @@ namespace ErsatzTV.Infrastructure.MySql.Migrations
                                     b2.Property<int>("Seed")
                                         .HasColumnType("int");
 
+                                    b2.Property<bool>("Started")
+                                        .HasColumnType("tinyint(1)");
+
                                     b2.HasKey("PlayoutAnchorPlayoutId");
 
                                     b2.ToTable("ScheduleItemsEnumeratorState", (string)null);
@@ -5349,6 +5373,9 @@ namespace ErsatzTV.Infrastructure.MySql.Migrations
                             b1.Property<int>("Seed")
                                 .HasColumnType("int");
 
+                            b1.Property<bool>("Started")
+                                .HasColumnType("tinyint(1)");
+
                             b1.HasKey("PlayoutProgramScheduleAnchorId");
 
                             b1.ToTable("CollectionEnumeratorState", (string)null);
@@ -5398,6 +5425,9 @@ namespace ErsatzTV.Infrastructure.MySql.Migrations
 
                             b1.Property<int>("Seed")
                                 .HasColumnType("int");
+
+                            b1.Property<bool>("Started")
+                                .HasColumnType("tinyint(1)");
 
                             b1.HasKey("PlayoutScheduleItemFillGroupIndexId");
 

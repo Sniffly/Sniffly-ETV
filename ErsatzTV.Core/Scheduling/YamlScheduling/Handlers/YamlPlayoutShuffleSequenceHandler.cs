@@ -5,6 +5,8 @@ namespace ErsatzTV.Core.Scheduling.YamlScheduling.Handlers;
 
 public class YamlPlayoutShuffleSequenceHandler : IYamlPlayoutHandler
 {
+    private const int MaxShuffleAttempts = 10;
+
     public bool Reset => false;
 
     public Task<bool> Handle(
@@ -28,24 +30,36 @@ public class YamlPlayoutShuffleSequenceHandler : IYamlPlayoutHandler
 
         string sequenceKey = shuffleSequenceInstruction.ShuffleSequence;
 
-        var groupedSequenceItems = context.Definition.Playout
-            .Where(i => i.SequenceKey == sequenceKey)
-            .GroupBy(i => i.SequenceGuid)
+        List<YamlPlayoutInstruction> playout = context.CurrentInstructions;
+
+        var groupedSequenceItems = playout
+            .Select((instruction, index) => new { Instruction = instruction, Index = index })
+            .Where(x => x.Instruction.SequenceKey == sequenceKey)
+            .GroupBy(x => x.Instruction.SequenceGuid)
             .ToList();
 
-        foreach (IGrouping<Guid, YamlPlayoutInstruction> grouping in groupedSequenceItems)
+        foreach (var grouping in groupedSequenceItems)
         {
-            // shuffle, avoiding starting with the tail of the last shuffle
-            YamlPlayoutInstruction tail = grouping.Last();
-            var shuffledGroup = grouping.OrderBy(_ => Guid.NewGuid()).ToList();
-            while (shuffledGroup.Count > 1 && shuffledGroup.Head() == tail)
+            var currentGroup = grouping.OrderBy(x => x.Index).ToList();
+
+            // shuffle, try to avoid starting with the tail of the last shuffle
+            YamlPlayoutInstruction tail = currentGroup.Last().Instruction;
+            var shuffledGroup = currentGroup.Select(x => x.Instruction).OrderBy(_ => Guid.NewGuid()).ToList();
+
+            var attempts = 0;
+            while (shuffledGroup.Count > 1
+                   && shuffledGroup.Head() == tail
+                   && attempts++ < MaxShuffleAttempts
+                   && !cancellationToken.IsCancellationRequested)
             {
-                shuffledGroup = grouping.OrderBy(_ => Guid.NewGuid()).ToList();
+                shuffledGroup = currentGroup.Select(x => x.Instruction).OrderBy(_ => Guid.NewGuid()).ToList();
             }
 
-            int firstIndex = context.Definition.Playout.FindIndex(i => i.SequenceGuid == grouping.Key);
-            context.Definition.Playout.RemoveRange(firstIndex, shuffledGroup.Count);
-            context.Definition.Playout.InsertRange(firstIndex, shuffledGroup);
+            for (var index = 0; index < currentGroup.Count; index++)
+            {
+                shuffledGroup[index].SequenceShuffled = true;
+                playout[currentGroup[index].Index] = shuffledGroup[index];
+            }
         }
 
         return Task.FromResult(true);

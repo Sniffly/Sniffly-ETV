@@ -1,4 +1,4 @@
-using System.CommandLine.Parsing;
+﻿using System.CommandLine.Parsing;
 using System.IO.Abstractions;
 using CliWrap;
 using CliWrap.Buffered;
@@ -6,6 +6,7 @@ using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.Core.Interfaces.Scheduling;
 using ErsatzTV.Core.Scheduling.Engine;
+using ErsatzTV.Core.Security;
 using Microsoft.Extensions.Logging;
 
 namespace ErsatzTV.Core.Scheduling.ScriptedScheduling;
@@ -34,6 +35,10 @@ public class ScriptedPlayoutBuilder(
         try
         {
             var args = CommandLineParser.SplitCommandLine(playout.ScheduleFile).ToList();
+            if (args.Count == 0)
+            {
+                return BaseError.New("Scripted schedule does not exist!");
+            }
 
             string scriptFile = args[0];
             string[] scriptArgs = args.Skip(1).ToArray();
@@ -61,7 +66,7 @@ public class ScriptedPlayoutBuilder(
             logger.LogInformation(
                 "Building scripted playout {Script} with arguments {Arguments}",
                 scriptFile,
-                arguments);
+                scriptArgs);
 
             int daysToBuild = await GetDaysToBuild(cancellationToken);
             DateTimeOffset finish = start.AddDays(daysToBuild);
@@ -88,6 +93,7 @@ public class ScriptedPlayoutBuilder(
 
             Command command = Cli.Wrap(scriptFile)
                 .WithArguments(arguments)
+                .WithEnvironmentVariables(env => env.Set(ApiHelper.EnvironmentVariableName, ApiHelper.ApiKey))
                 .WithValidation(CommandResultValidation.None);
 
             var commandResult = await command.ExecuteBufferedAsync(linkedCts.Token);
@@ -107,6 +113,12 @@ public class ScriptedPlayoutBuilder(
             }
 
             playout.Anchor = schedulingEngine.GetAnchor();
+
+            // on-demand channels will trim already-played items in time shifter
+            if (referenceData.Channel.PlayoutMode != ChannelPlayoutMode.OnDemand)
+            {
+                schedulingEngine.RemoveBefore(start.AddHours(-4));
+            }
 
             result = MergeResult(result, schedulingEngine.GetState());
         }

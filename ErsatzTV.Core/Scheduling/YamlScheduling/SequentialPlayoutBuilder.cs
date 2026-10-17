@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using System.IO.Abstractions;
+using System.Security.Cryptography;
+using System.Text;
 using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Domain.Scheduling;
 using ErsatzTV.Core.Interfaces.Repositories;
@@ -10,6 +12,7 @@ using ErsatzTV.Core.Scheduling.YamlScheduling.Models;
 using ErsatzTV.Core.Search;
 using LanguageExt.UnsafeValueAccess;
 using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -110,6 +113,7 @@ public class SequentialPlayoutBuilder(
         DateTimeOffset finish = start.AddDays(daysToBuild);
 
         Dictionary<YamlPlayoutInstruction, IYamlPlayoutHandler> handlers = new();
+        Dictionary<string, List<YamlPlayoutInstruction>> fillerSequences = new();
         var enumeratorCache = new EnumeratorCache(mediaCollectionRepository, logger);
 
         var context = new YamlPlayoutContext(playout, playoutDefinition, 1)
@@ -249,20 +253,64 @@ public class SequentialPlayoutBuilder(
                 break;
             }
 
-            FlattenSequences(context);
+            FlattenSequences(context, context.Definition.Playout);
             flattenCount++;
         }
+
+        // flatten each schedule's playout the same way as the default playout
+        foreach (YamlPlayoutScheduleItem schedule in context.Definition.Schedules)
+        {
+            var scheduleFlattenCount = 0;
+            while (schedule.Playout.Any(x => x is YamlPlayoutSequenceInstruction))
+            {
+                if (scheduleFlattenCount > 100)
+                {
+                    logger.LogError(
+                        "YAML schedule '{Schedule}' contains sequence nesting that is too deep; this introduces undefined behavior",
+                        schedule.Name);
+                    break;
+                }
+
+                FlattenSequences(context, schedule.Playout);
+                scheduleFlattenCount++;
+            }
+        }
+
+        context.RestoreSequenceOrders();
 
         // handle all playout instructions
         while (context.CurrentTime < finish)
         {
-            if (context.InstructionIndex >= playoutDefinition.Playout.Count)
+            // select the active schedule (if any) for the current time; a null name means the default playout
+            string activeScheduleName = null;
+            foreach (YamlPlayoutScheduleItem activeSchedule in
+                     AlternateScheduleSelector.GetScheduleForDate(context.Definition.Schedules, context.CurrentTime))
+            {
+                activeScheduleName = activeSchedule.Name;
+            }
+
+            if (!string.Equals(activeScheduleName, context.ActiveSchedule, StringComparison.Ordinal))
+            {
+                logger.LogDebug(
+                    "Switching sequential playout to schedule {Schedule} at {Time}",
+                    activeScheduleName ?? "(default)",
+                    context.CurrentTime);
+
+                context.SwitchToSchedule(activeScheduleName);
+
+                // split the EPG guide group at the schedule boundary
+                context.AdvanceGuideGroup();
+            }
+
+            List<YamlPlayoutInstruction> instructions = context.CurrentInstructions;
+
+            if (context.InstructionIndex >= instructions.Count)
             {
                 logger.LogInformation("Reached the end of the YAML playout definition; stopping");
                 break;
             }
 
-            YamlPlayoutInstruction instruction = playoutDefinition.Playout[context.InstructionIndex];
+            YamlPlayoutInstruction instruction = instructions[context.InstructionIndex];
             //logger.LogDebug("Current playout instruction: {Instruction}", instruction.GetType().Name);
 
             Option<IYamlPlayoutHandler> maybeHandler = GetHandlerForInstruction(handlers, enumeratorCache, instruction);
@@ -280,6 +328,7 @@ public class SequentialPlayoutBuilder(
                 {
                     await ExecuteSequence(
                         handlers,
+                        fillerSequences,
                         enumeratorCache,
                         mode,
                         context,
@@ -326,18 +375,17 @@ public class SequentialPlayoutBuilder(
 
     private async Task ExecuteSequence(
         Dictionary<YamlPlayoutInstruction, IYamlPlayoutHandler> handlers,
+        Dictionary<string, List<YamlPlayoutInstruction>> fillerSequences,
         EnumeratorCache enumeratorCache,
         PlayoutBuildMode mode,
         YamlPlayoutContext context,
         string sequence,
         CancellationToken cancellationToken)
     {
-        var sequenceInstructions = context.Definition.Sequence
-            .Filter(s => s.Key == sequence)
-            .HeadOrNone()
-            .Map(s => s.Items)
-            .Flatten()
-            .ToList();
+        List<YamlPlayoutInstruction> sequenceInstructions = GetFillerSequenceInstructions(
+            context,
+            fillerSequences,
+            sequence);
 
         foreach (YamlPlayoutInstruction instruction in sequenceInstructions)
         {
@@ -361,6 +409,62 @@ public class SequentialPlayoutBuilder(
         }
     }
 
+    // nested sequences are expanded once per build so their (cloned) instructions keep reusing the same handlers;
+    // cycles are rejected before any filler sequence executes
+    private static List<YamlPlayoutInstruction> GetFillerSequenceInstructions(
+        YamlPlayoutContext context,
+        Dictionary<string, List<YamlPlayoutInstruction>> fillerSequences,
+        string sequence)
+    {
+        if (fillerSequences.TryGetValue(sequence, out List<YamlPlayoutInstruction> cached))
+        {
+            return cached;
+        }
+
+        var result = new List<YamlPlayoutInstruction>();
+
+        IEnumerable<YamlPlayoutInstruction> rawInstructions = context.Definition.Sequence
+            .Filter(s => s.Key == sequence)
+            .HeadOrNone()
+            .Map(s => s.Items)
+            .Flatten();
+
+        foreach (YamlPlayoutInstruction instruction in rawInstructions)
+        {
+            if (instruction is not YamlPlayoutSequenceInstruction sequenceInstruction)
+            {
+                result.Add(instruction);
+                continue;
+            }
+
+            List<YamlPlayoutInstruction> nestedInstructions = GetFillerSequenceInstructions(
+                context,
+                fillerSequences,
+                sequenceInstruction.Sequence);
+
+            if (!string.IsNullOrWhiteSpace(sequenceInstruction.CustomTitle))
+            {
+                nestedInstructions = nestedInstructions
+                    .Map(i =>
+                    {
+                        YamlPlayoutInstruction copy = i.Clone();
+                        copy.CustomTitle = sequenceInstruction.CustomTitle;
+                        return copy;
+                    })
+                    .ToList();
+            }
+
+            int repeat = sequenceInstruction.Repeat > 0 ? sequenceInstruction.Repeat : 1;
+            for (var r = 0; r < repeat; r++)
+            {
+                result.AddRange(nestedInstructions);
+            }
+        }
+
+        fillerSequences.Add(sequence, result);
+        return result;
+    }
+
     private static bool DetectCycle(YamlPlayoutDefinition definition)
     {
         var graph = new AdjGraph();
@@ -382,17 +486,17 @@ public class SequentialPlayoutBuilder(
             .GetValue<int>(ConfigElementKey.PlayoutDaysToBuild, cancellationToken)
             .IfNoneAsync(2);
 
-    private static void FlattenSequences(YamlPlayoutContext context)
+    private static void FlattenSequences(YamlPlayoutContext context, List<YamlPlayoutInstruction> playout)
     {
-        var rawInstructions = context.Definition.Playout.ToImmutableList();
-        context.Definition.Playout.Clear();
+        var rawInstructions = playout.ToImmutableList();
+        playout.Clear();
 
         foreach (YamlPlayoutInstruction instruction in rawInstructions)
         {
             switch (instruction)
             {
                 case YamlPlayoutSequenceInstruction sequenceInstruction:
-                    IEnumerable<YamlPlayoutInstruction> sequenceInstructions = context.Definition.Sequence
+                    List<YamlPlayoutInstruction> sequenceInstructions = context.Definition.Sequence
                         .Filter(s => s.Key == sequenceInstruction.Sequence)
                         .HeadOrNone()
                         .Map(s => s.Items)
@@ -400,30 +504,35 @@ public class SequentialPlayoutBuilder(
                         .ToList();
 
                     var sequenceGuid = Guid.NewGuid();
+                    string sequenceFingerprint = Convert.ToHexString(SHA256.HashData(
+                        Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(sequenceInstructions, Formatting.None))));
                     int repeat = sequenceInstruction.Repeat > 0 ? sequenceInstruction.Repeat : 1;
 
                     for (var r = 0; r < repeat; r++)
                     {
-                        // insert all instructions from the sequence
-                        foreach (YamlPlayoutInstruction i in sequenceInstructions)
+                        // insert independent instructions so each flattened sequence keeps its own shuffle state
+                        for (var index = 0; index < sequenceInstructions.Count; index++)
                         {
-                            // used for shuffling
-                            i.SequenceKey = sequenceInstruction.Sequence;
-                            i.SequenceGuid = sequenceGuid;
+                            YamlPlayoutInstruction instructionCopy = sequenceInstructions[index].Clone();
+                            instructionCopy.SequenceKey = sequenceInstruction.Sequence;
+                            instructionCopy.SequenceGuid = sequenceGuid;
+                            instructionCopy.SequenceIndex = r * sequenceInstructions.Count + index;
+                            instructionCopy.SequenceShuffled = false;
+                            instructionCopy.SequenceFingerprint = sequenceFingerprint;
 
                             // copy custom title
                             if (!string.IsNullOrWhiteSpace(sequenceInstruction.CustomTitle))
                             {
-                                i.CustomTitle = sequenceInstruction.CustomTitle;
+                                instructionCopy.CustomTitle = sequenceInstruction.CustomTitle;
                             }
 
-                            context.Definition.Playout.Add(i);
+                            playout.Add(instructionCopy);
                         }
                     }
 
                     break;
                 default:
-                    context.Definition.Playout.Add(instruction);
+                    playout.Add(instruction);
                     break;
             }
         }

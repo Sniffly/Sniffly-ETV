@@ -85,6 +85,8 @@ public class CreateChannelHandler(
                 PlayoutMode = request.PlayoutMode,
                 MirrorSourceChannelId = request.MirrorSourceChannelId,
                 PlayoutOffset = request.PlayoutOffset,
+                StreamingEngine = request.StreamingEngine,
+                NextEngineTextSubtitleMode = request.NextEngineTextSubtitleMode,
                 StreamingMode = request.StreamingMode,
                 Artwork = artwork,
                 StreamSelectorMode = request.StreamSelectorMode,
@@ -110,6 +112,13 @@ public class CreateChannelHandler(
             {
                 channel.MirrorSourceChannelId = null;
                 channel.PlayoutOffset = null;
+            }
+
+            if (channel.StreamingEngine is StreamingEngine.Next &&
+                channel.StreamingMode is not StreamingMode.HttpLiveStreamingSegmenter &&
+                channel.StreamingMode is not StreamingMode.TransportStreamHybrid)
+            {
+                channel.StreamingMode = StreamingMode.HttpLiveStreamingSegmenter;
             }
 
             foreach (int id in watermarkId)

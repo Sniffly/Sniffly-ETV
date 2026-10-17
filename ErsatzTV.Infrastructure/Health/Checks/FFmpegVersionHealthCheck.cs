@@ -1,4 +1,5 @@
-﻿using ErsatzTV.Core.Domain;
+﻿using System.Globalization;
+using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Health;
 using ErsatzTV.Core.Health.Checks;
 using ErsatzTV.Core.Interfaces.Repositories;
@@ -11,15 +12,15 @@ public class FFmpegVersionHealthCheck(
     IHardwareCapabilitiesFactory hardwareCapabilitiesFactory)
     : BaseHealthCheck, IFFmpegVersionHealthCheck
 {
-    private const string BundledVersion = "7.1.1";
-    private const string BundledVersionVaapi = "7.1.1";
-    private const string WindowsVersionPrefix = "n7.1.1";
+    private const string BundledVersion = "8.1.2";
+    private const int BundledRevision = 4;
+    private const string BundledRelease = "8.1.2-4";
 
     public override string Title => "FFmpeg Version";
 
     public async Task<HealthCheckResult> Check(CancellationToken cancellationToken)
     {
-        var link = new HealthCheckLink("https://github.com/ErsatzTV/ErsatzTV-ffmpeg/releases/tag/7.1.1");
+        var link = new HealthCheckLink($"https://github.com/ErsatzTV/ErsatzTV-ffmpeg/releases/tag/{BundledRelease}");
 
         Option<ConfigElement> maybeFFmpegPath =
             await configElementRepository.GetConfigElement(ConfigElementKey.FFmpegPath, cancellationToken);
@@ -82,25 +83,37 @@ public class FFmpegVersionHealthCheck(
         if (version.StartsWith("3.", StringComparison.OrdinalIgnoreCase) ||
             version.StartsWith("4.", StringComparison.OrdinalIgnoreCase) ||
             version.StartsWith("5.", StringComparison.OrdinalIgnoreCase) ||
-            version.StartsWith("6.", StringComparison.OrdinalIgnoreCase))
+            version.StartsWith("6.", StringComparison.OrdinalIgnoreCase) ||
+            version.StartsWith("7.", StringComparison.OrdinalIgnoreCase))
         {
             return FailResult(
-                $"{app} version {version} is too old; please install 7.1.1!",
+                $"{app} version {version} is too old; please install ErsatzTV-ffmpeg {BundledRelease}!",
                 $"{app} version is too old",
                 link);
         }
 
-        if (!version.StartsWith("7.1.1", StringComparison.OrdinalIgnoreCase) &&
-            !version.StartsWith(WindowsVersionPrefix, StringComparison.OrdinalIgnoreCase) &&
-            version != BundledVersion &&
-            version != BundledVersionVaapi)
+        if (!IsBundledSeries(version))
         {
             return WarningResult(
-                $"{app} version {version} is unexpected and may have problems; please install 7.1.1!",
-                $"{app} version is unexpected",
+                $"{app} version {version} is not a current ErsatzTV-ffmpeg build; please install ErsatzTV-ffmpeg {BundledRelease}!",
+                $"{app} version is not current",
                 link);
         }
 
         return None;
+    }
+
+    // newer revisions pass: they can reach /releases/latest (e.g. Proxmox) before a legacy release bumps this
+    private static bool IsBundledSeries(string version)
+    {
+        string v = version.StartsWith('n') ? version[1..] : version;
+        var prefix = $"{BundledVersion}-etv.";
+        return v.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
+               int.TryParse(
+                   v.AsSpan(prefix.Length),
+                   NumberStyles.None,
+                   CultureInfo.InvariantCulture,
+                   out int revision) &&
+               revision >= BundledRevision;
     }
 }

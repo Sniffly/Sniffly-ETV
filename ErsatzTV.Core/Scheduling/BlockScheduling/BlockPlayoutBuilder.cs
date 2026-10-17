@@ -74,8 +74,14 @@ public class BlockPlayoutBuilder(
             return result;
         }
 
+        DateTimeOffset requestedStart = start;
+
         // always start at the beginning of the block
-        start = blocksToSchedule.Min(b => b.Start);
+        DateTimeOffset firstBlockStart = blocksToSchedule.Min(b => b.Start);
+        if (firstBlockStart < start)
+        {
+            start = firstBlockStart;
+        }
 
         // get all collection items for the playout
         Map<CollectionKey, List<MediaItem>> collectionMediaItems =
@@ -114,6 +120,8 @@ public class BlockPlayoutBuilder(
         {
             BlockPlayoutChangeDetection.RemoveItemAndHistory(referenceData, playoutItem, result);
         }
+
+        BlockPlayoutChangeDetection.RemoveOrphanedHistory(referenceData, requestedStart, result);
 
         var playoutItemsToRemoveIds = playoutItemsToRemove.Select(i => i.Id).ToHashSet();
         var baseItems = referenceData.ExistingItems.Where(i => !playoutItemsToRemoveIds.Contains(i.Id)).ToList();
@@ -217,21 +225,21 @@ public class BlockPlayoutBuilder(
                         if (effectiveBlock.Block.StopScheduling is BlockStopScheduling.BeforeDurationEnd &&
                             itemDuration > blockDuration)
                         {
-                            foreach (TimeSpan minimumDuration in enumerator.MinimumDuration)
-                            {
-                                if (minimumDuration > blockDuration)
-                                {
-                                    Logger.LogError(
-                                        "Collection with minimum duration {Duration:hh\\:mm\\:ss} will never fit in block with duration {BlockDuration:hh\\:mm\\:ss}; skipping this block item!",
-                                        minimumDuration,
-                                        blockDuration);
+                            // enumerator.MinimumDuration is none for images and remote streams, which
+                            // would skip forever, so use the same duration source as the check above
+                            TimeSpan minimumDuration = collectionMediaItems[CollectionKey.ForBlockItem(blockItem)]
+                                .Map(i => i.GetDurationForPlayout())
+                                .OrderBy(identity)
+                                .Head();
 
-                                    done = true;
-                                }
-                            }
-
-                            if (done)
+                            if (minimumDuration > blockDuration)
                             {
+                                Logger.LogError(
+                                    "Collection with minimum duration {Duration:hh\\:mm\\:ss} will never fit in block with duration {BlockDuration:hh\\:mm\\:ss}; skipping this block item!",
+                                    minimumDuration,
+                                    blockDuration);
+
+                                done = true;
                                 break;
                             }
 
@@ -363,20 +371,25 @@ public class BlockPlayoutBuilder(
         var collectionKey = CollectionKey.ForBlockItem(blockItem);
         List<MediaItem> collectionItems = collectionMediaItems[collectionKey];
 
+        var filteredHistory = referenceData.PlayoutHistory
+            .Where(h => !result.HistoryToRemove.Contains(h.Id))
+            .Append(result.AddedHistory)
+            .ToList();
+
         // get enumerator
         IMediaCollectionEnumerator enumerator = blockItem.PlaybackOrder switch
         {
             PlaybackOrder.Chronological => BlockPlayoutEnumerator.Chronological(
                 collectionItems,
                 currentTime,
-                referenceData.PlayoutHistory.Append(result.AddedHistory).ToList(),
+                filteredHistory,
                 blockItem,
                 historyKey,
                 logger),
             PlaybackOrder.SeasonEpisode => BlockPlayoutEnumerator.SeasonEpisode(
                 collectionItems,
                 currentTime,
-                referenceData.PlayoutHistory.Append(result.AddedHistory).ToList(),
+                filteredHistory,
                 blockItem,
                 historyKey,
                 logger),
@@ -384,14 +397,14 @@ public class BlockPlayoutBuilder(
                 collectionItems,
                 currentTime,
                 playout.Seed,
-                referenceData.PlayoutHistory.Append(result.AddedHistory).ToList(),
+                filteredHistory,
                 blockItem,
                 historyKey),
             PlaybackOrder.RandomRotation => BlockPlayoutEnumerator.RandomRotation(
                 collectionItems,
                 currentTime,
                 playout.Seed,
-                referenceData.PlayoutHistory.Append(result.AddedHistory).ToList(),
+                filteredHistory,
                 blockItem,
                 historyKey),
             _ => new RandomizedMediaCollectionEnumerator(

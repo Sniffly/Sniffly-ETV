@@ -47,7 +47,14 @@ public class ArchiveMediaSampleHandler(
 
             foreach (string mediaSample in maybeMediaSample)
             {
-                return await GetArchive(request, mediaSample, cancellationToken);
+                try
+                {
+                    return await GetArchive(request, mediaSample, cancellationToken);
+                }
+                finally
+                {
+                    _fileSystem.File.Delete(mediaSample);
+                }
             }
         }
 
@@ -112,6 +119,13 @@ public class ArchiveMediaSampleHandler(
                     // fall back to mkv when extension is otherwise unknown
                     extension = "mkv";
                 }
+            }
+
+            bool isRemoteUri = Uri.TryCreate(mediaItemPath, UriKind.Absolute, out Uri uriResult)
+                               && (uriResult.Scheme == Uri.UriSchemeHttp || uriResult.Scheme == Uri.UriSchemeHttps);
+            if (isRemoteUri && extension.Contains('?'))
+            {
+                extension = extension.Split('?')[0];
             }
 
             string tempPath = Path.GetTempPath();

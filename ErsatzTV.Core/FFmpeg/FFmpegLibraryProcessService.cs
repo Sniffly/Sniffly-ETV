@@ -9,6 +9,7 @@ using ErsatzTV.Core.Interfaces.FFmpeg;
 using ErsatzTV.Core.Interfaces.Metadata;
 using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.Core.Interfaces.Streaming;
+using ErsatzTV.Core.Security;
 using ErsatzTV.FFmpeg;
 using ErsatzTV.FFmpeg.Environment;
 using ErsatzTV.FFmpeg.Format;
@@ -25,7 +26,7 @@ namespace ErsatzTV.Core.FFmpeg;
 public class FFmpegLibraryProcessService : IFFmpegProcessService
 {
     private readonly IConfigElementRepository _configElementRepository;
-    private readonly IGraphicsElementLoader _graphicsElementLoader;
+    private readonly IGraphicsEngineContextFactory _graphicsEngineContextFactory;
     private readonly IMemoryCache _memoryCache;
     private readonly IMpegTsScriptService _mpegTsScriptService;
     private readonly ILocalStatisticsProvider _localStatisticsProvider;
@@ -45,7 +46,7 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
         ITempFilePool tempFilePool,
         IPipelineBuilderFactory pipelineBuilderFactory,
         IConfigElementRepository configElementRepository,
-        IGraphicsElementLoader graphicsElementLoader,
+        IGraphicsEngineContextFactory graphicsEngineContextFactory,
         IMemoryCache memoryCache,
         IMpegTsScriptService mpegTsScriptService,
         ILocalStatisticsProvider localStatisticsProvider,
@@ -59,7 +60,7 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
         _tempFilePool = tempFilePool;
         _pipelineBuilderFactory = pipelineBuilderFactory;
         _configElementRepository = configElementRepository;
-        _graphicsElementLoader = graphicsElementLoader;
+        _graphicsEngineContextFactory = graphicsEngineContextFactory;
         _memoryCache = memoryCache;
         _mpegTsScriptService = mpegTsScriptService;
         _localStatisticsProvider = localStatisticsProvider;
@@ -132,7 +133,8 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
                 channel,
                 start,
                 audioVersion,
-                allSubtitles);
+                allSubtitles,
+                shouldLogMessages: true);
             maybeAudioStream = result.AudioStream;
             maybeSubtitle = result.Subtitle;
 
@@ -153,6 +155,7 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
                     channel,
                     preferredAudioLanguage,
                     preferredAudioTitle,
+                    shouldLogMessages: true,
                     cancellationToken);
 
             maybeSubtitle =
@@ -161,6 +164,7 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
                     channel,
                     preferredSubtitleLanguage,
                     subtitleMode,
+                    shouldLogMessages: true,
                     cancellationToken);
         }
 
@@ -176,12 +180,15 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
                 if (subtitle.SubtitleKind == SubtitleKind.Sidecar || subtitle is
                         { SubtitleKind: SubtitleKind.Embedded, IsImage: false, IsExtracted: true })
                 {
+                    DateTimeOffset exp = finish + TimeSpan.FromHours(2);
+                    string sig = InternalUrlSigner.Sign(exp, "subtitle", $"{subtitle.Id}");
+
                     // proxy to avoid dealing with escaping
-                    subtitle.Path = $"http://localhost:{Settings.StreamingPort}/media/subtitle/{subtitle.Id}";
+                    subtitle.Path = $"http://localhost:{Settings.StreamingPort}/internal/media/subtitle/{subtitle.Id}?exp={exp.ToUnixTimeSeconds()}&sig={sig}";
 
                     foreach (TimeSpan seek in playbackSettings.StreamSeek)
                     {
-                        subtitle.Path += $"?seekToMs={(int)seek.TotalMilliseconds}";
+                        subtitle.Path += $"&seekToMs={(int)seek.TotalMilliseconds}";
                     }
                 }
             }
@@ -377,7 +384,7 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
         Option<WatermarkInputFile> watermarkInputFile = Option<WatermarkInputFile>.None;
         Option<GraphicsEngineInput> graphicsEngineInput = Option<GraphicsEngineInput>.None;
         Option<GraphicsEngineContext> graphicsEngineContext = Option<GraphicsEngineContext>.None;
-        List<GraphicsElementContext> graphicsElementContexts = [];
+        List<WatermarkOptions> engineWatermarks = [];
 
         // use ffmpeg for single permanent watermark, graphics engine for all others
         if (graphicsElements.Count == 0 && watermarks.Count == 1 && watermarks.All(wm => wm.Watermark.Mode is ChannelWatermarkMode.Permanent))
@@ -415,7 +422,7 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
         }
         else
         {
-            graphicsElementContexts.AddRange(watermarks.Map(wm => new WatermarkElementContext(wm)));
+            engineWatermarks.AddRange(watermarks);
         }
 
         string videoFormat = GetVideoFormat(playbackSettings);
@@ -532,33 +539,29 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
             playbackSettings.Deinterlace);
 
         // only use graphics engine when we have elements, and are normalizing video
-        if (videoFormat != VideoFormat.Copy && (graphicsElementContexts.Count > 0 || graphicsElements.Count > 0))
+        if (videoFormat != VideoFormat.Copy && (engineWatermarks.Count > 0 || graphicsElements.Count > 0))
         {
-            FrameSize targetSize = await desiredState.CroppedSize.IfNoneAsync(desiredState.ScaledSize);
-
             FrameRate frameRate = await playbackSettings.FrameRate
                 .IfNoneAsync(new FrameRate(videoVersion.MediaVersion.RFrameRate));
 
-            var context = new GraphicsEngineContext(
-                channel.Number,
+            graphicsEngineContext = await _graphicsEngineContextFactory.Create(
+                channel,
                 audioVersion.MediaItem,
-                graphicsElementContexts,
-                TemplateVariables: [],
-                new Resolution { Width = targetSize.Width, Height = targetSize.Height },
-                channel.FFmpegProfile.Resolution,
+                videoVersion.MediaVersion,
+                engineWatermarks,
+                graphicsElements,
                 frameRate,
                 channelStartTime,
                 start,
+                now + originalContentDuration,
                 now > start ? now - start : TimeSpan.Zero,
                 finish - now,
-                originalContentDuration);
+                originalContentDuration,
+                cancellationToken);
 
-            context = await _graphicsElementLoader.LoadAll(context, graphicsElements, cancellationToken);
-
-            if (context?.Elements?.Count > 0)
+            if (graphicsEngineContext.IsSome)
             {
                 graphicsEngineInput = new GraphicsEngineInput();
-                graphicsEngineContext = context;
             }
         }
 
@@ -983,7 +986,7 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
         var resolution = new FrameSize(channel.FFmpegProfile.Resolution.Width, channel.FFmpegProfile.Resolution.Height);
 
         var concatInputFile = new ConcatInputFile(
-            $"http://localhost:{Settings.StreamingPort}/ffmpeg/concat/{channel.Number}?mode=ts-legacy",
+            $"http://localhost:{Settings.StreamingPort}/internal/ffmpeg/concat/{channel.Number}?mode=ts-legacy",
             resolution);
 
         IPipelineBuilder pipelineBuilder = await _pipelineBuilderFactory.GetBuilder(
@@ -1024,8 +1027,9 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
             ? string.Empty
             : $"&access_token={accessToken}";
 
+        // Empty subtitle streams delay MPEG-TS output by about 10 seconds.
         var concatInputFile = new ConcatInputFile(
-            $"http://localhost:{Settings.StreamingPort}/iptv/channel/{channel.Number}.m3u8?mode=segmenter{accessTokenQuery}",
+            $"http://localhost:{Settings.StreamingPort}/iptv/channel/{channel.Number}.m3u8?mode=segmenter&subtitles=false{accessTokenQuery}",
             resolution);
 
         if (channel.FFmpegProfile.AudioFormat is FFmpegProfileAudioFormat.AacLatm)
@@ -1036,9 +1040,9 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
         // TODO: save reports?
         string defaultScript = await _configElementRepository
             .GetValue<string>(ConfigElementKey.FFmpegDefaultMpegTsScript, cancellationToken)
-            .IfNoneAsync("Default");
+            .IfNoneAsync("default");
         List<MpegTsScript> allScripts = _mpegTsScriptService.GetScripts();
-        Option<MpegTsScript> maybeScript = Optional(allScripts.Find(s => s.Id == defaultScript));
+        Option<MpegTsScript> maybeScript = Optional(allScripts.Find(s => string.Equals(s.Id, defaultScript, StringComparison.OrdinalIgnoreCase)));
         foreach (var script in maybeScript)
         {
             Option<Command> maybeCommand = await _mpegTsScriptService.Execute(
@@ -1046,6 +1050,14 @@ public class FFmpegLibraryProcessService : IFFmpegProcessService
                 channel,
                 concatInputFile.Url,
                 ffmpegPath);
+
+            if (maybeCommand.IsNone)
+            {
+                _logger.LogWarning(
+                    "mpeg-ts script {NameOrId} did not produce a command; falling back to built-in pipeline",
+                    string.IsNullOrWhiteSpace(script.Name) ? script.Id : script.Name);
+            }
+
             foreach (var command in maybeCommand)
             {
                 return command;

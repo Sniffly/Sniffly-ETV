@@ -472,6 +472,11 @@ public class JellyfinApiClient : IJellyfinApiClient
     {
         try
         {
+            if (item.Type != "Movie")
+            {
+                return None;
+            }
+
             if (item.LocationType != "FileSystem")
             {
                 return None;
@@ -665,6 +670,11 @@ public class JellyfinApiClient : IJellyfinApiClient
     {
         try
         {
+            if (item.Type != "Series")
+            {
+                return None;
+            }
+
             ShowMetadata metadata = ProjectToShowMetadata(item);
 
             var show = new JellyfinShow
@@ -758,6 +768,11 @@ public class JellyfinApiClient : IJellyfinApiClient
     {
         try
         {
+            if (item.Type != "Season")
+            {
+                return None;
+            }
+
             DateTime dateAdded = item.DateCreated.UtcDateTime;
             // DateTime lastWriteTime = DateTimeOffset.FromUnixTimeSeconds(response.UpdatedAt).DateTime;
 
@@ -831,6 +846,11 @@ public class JellyfinApiClient : IJellyfinApiClient
     {
         try
         {
+            if (item.Type != "BoxSet")
+            {
+                return None;
+            }
+
             return new JellyfinCollection
             {
                 ItemId = item.Id,
@@ -849,6 +869,11 @@ public class JellyfinApiClient : IJellyfinApiClient
     {
         try
         {
+            if (item.Type != "Episode")
+            {
+                return None;
+            }
+
             if (item.LocationType != "FileSystem")
             {
                 return None;
@@ -1065,7 +1090,8 @@ public class JellyfinApiClient : IJellyfinApiClient
                     ColorRange = (videoStream.ColorRange ?? string.Empty).ToLowerInvariant(),
                     ColorSpace = (videoStream.ColorSpace ?? string.Empty).ToLowerInvariant(),
                     ColorTransfer = (videoStream.ColorTransfer ?? string.Empty).ToLowerInvariant(),
-                    ColorPrimaries = (videoStream.ColorPrimaries ?? string.Empty).ToLowerInvariant()
+                    ColorPrimaries = (videoStream.ColorPrimaries ?? string.Empty).ToLowerInvariant(),
+                    Rotation = videoStream.Rotation.HasValue ? (videoStream.Rotation.Value % 360 + 360) % 360 : 0
                 });
 
             foreach (JellyfinMediaStreamResponse audioStream in streams.Filter(s =>
@@ -1124,6 +1150,6 @@ public class JellyfinApiClient : IJellyfinApiClient
     {
         var client = _httpClientFactory.CreateClient("RefitCustomClient");
         client.BaseAddress = new Uri(address);
-        return RestService.For<IJellyfinApi>(client);
+        return RestService.ForGenerated<IJellyfinApi>(client);
     }
 }

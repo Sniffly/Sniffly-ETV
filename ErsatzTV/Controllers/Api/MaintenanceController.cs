@@ -2,6 +2,7 @@ using System.Threading.Channels;
 using ErsatzTV.Application;
 using ErsatzTV.Application.Maintenance;
 using ErsatzTV.Core;
+using ErsatzTV.Extensions;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
 
@@ -23,28 +24,14 @@ public class MaintenanceController(IMediator mediator, ChannelWriter<IBackground
     [HttpPost("/api/maintenance/empty_trash")]
     [Tags("Maintenance")]
     [EndpointSummary("Empty trash")]
-    public async Task<IActionResult> EmptyTrash()
-    {
-        Either<BaseError, Unit> result = await mediator.Send(new EmptyTrash());
-        foreach (BaseError error in result.LeftToSeq())
-        {
-            return new ContentResult
-            {
-                StatusCode = StatusCodes.Status500InternalServerError,
-                Content = error.ToString(),
-                ContentType = "text/plain"
-            };
-        }
-
-        return new OkResult();
-    }
+    public Task<IActionResult> EmptyTrash() => mediator.Send(new EmptyTrash()).ToActionResult();
 
     [HttpPost("/api/maintenance/clean_artwork")]
     [Tags("Maintenance")]
     [EndpointSummary("Clean artwork cache")]
-    public async Task<IActionResult> CleanArtwork(CancellationToken cancellationToken)
+    public async Task<IActionResult> CleanArtwork(CancellationToken cancellationToken, [FromQuery] int limit = 100_000)
     {
-        await workerChannel.WriteAsync(new DeleteOrphanedArtwork(), cancellationToken);
+        await workerChannel.WriteAsync(new DeleteOrphanedArtwork(limit), cancellationToken);
         return new OkResult();
     }
 }

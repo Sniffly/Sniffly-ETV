@@ -171,6 +171,9 @@ public class MetadataRepository(IDbContextFactory<TvContext> dbContextFactory) :
                     existingStream.ColorSpace = incomingStream.ColorSpace;
                     existingStream.ColorTransfer = incomingStream.ColorTransfer;
                     existingStream.ColorPrimaries = incomingStream.ColorPrimaries;
+                    existingStream.DvProfile = incomingStream.DvProfile;
+                    existingStream.HasHdr10Metadata = incomingStream.HasHdr10Metadata;
+                    existingStream.Rotation = incomingStream.Rotation;
                     existingStream.BitsPerRawSample = incomingStream.BitsPerRawSample;
                     existingStream.FileName = incomingStream.FileName;
                     existingStream.MimeType = incomingStream.MimeType;
@@ -530,10 +533,11 @@ public class MetadataRepository(IDbContextFactory<TvContext> dbContextFactory) :
     public async Task<bool> UpdateSubtitles(
         Core.Domain.Metadata metadata,
         List<Subtitle> subtitles,
+        SidecarSubtitleIdentity sidecarIdentity,
         CancellationToken cancellationToken)
     {
         await using TvContext dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
-        return await UpdateSubtitles(dbContext, metadata, subtitles, cancellationToken);
+        return await UpdateSubtitles(dbContext, metadata, subtitles, sidecarIdentity, cancellationToken);
     }
 
     public async Task<bool> UpdateChapters(
@@ -593,8 +597,12 @@ public class MetadataRepository(IDbContextFactory<TvContext> dbContextFactory) :
     {
         await using TvContext dbContext = await dbContextFactory.CreateDbContextAsync();
         return await dbContext.Connection.ExecuteAsync(
-                "DELETE FROM Tag WHERE Id = @TagId AND ((ExternalCollectionId = @ExternalCollectionId) OR (ExternalCollectionId IS NULL AND @ExternalCollectionId IS NULL))",
-                new { TagId = tag.Id, tag.ExternalCollectionId })
+                // the id alone finds the row; the 2 other columns make sure that a scanner
+                // does not delete a tag that a different scanner owns
+                @"DELETE FROM Tag WHERE Id = @TagId
+                  AND ((ExternalCollectionId = @ExternalCollectionId) OR (ExternalCollectionId IS NULL AND @ExternalCollectionId IS NULL))
+                  AND ((ExternalTypeId = @ExternalTypeId) OR (ExternalTypeId IS NULL AND @ExternalTypeId IS NULL))",
+                new { TagId = tag.Id, tag.ExternalCollectionId, tag.ExternalTypeId })
             .Map(result => result > 0);
     }
 
@@ -627,6 +635,7 @@ public class MetadataRepository(IDbContextFactory<TvContext> dbContextFactory) :
         TvContext dbContext,
         Core.Domain.Metadata metadata,
         List<Subtitle> subtitles,
+        SidecarSubtitleIdentity sidecarIdentity,
         CancellationToken cancellationToken)
     {
         // _logger.LogDebug(
@@ -663,85 +672,138 @@ public class MetadataRepository(IDbContextFactory<TvContext> dbContextFactory) :
 
         foreach (Core.Domain.Metadata existing in maybeMetadata)
         {
-            var toAdd = subtitles.Filter(s => existing.Subtitles.All(es => es.StreamIndex != s.StreamIndex)).ToList();
-            var toRemove = existing.Subtitles.Filter(es => subtitles.All(s => s.StreamIndex != es.StreamIndex))
-                .ToList();
-            var toUpdate = subtitles.Except(toAdd).ToList();
+            bool changed = MergeSubtitles(
+                existing,
+                incoming: subtitles.Filter(s => s.SubtitleKind is SubtitleKind.Embedded),
+                SubtitleKind.Embedded,
+                keyOf: s => $"idx:{s.StreamIndex}",
+                applyUpdate: ApplyEmbeddedUpdate,
+                dbContext);
 
-            // _logger.LogDebug(
-            //     "Subtitles to add: {ToAdd}, to remove: {ToRemove}, to update: {ToUpdate}",
-            //     toAdd.Count,
-            //     toRemove.Count,
-            //     toUpdate.Count);
+            changed |= MergeSubtitles(
+                existing,
+                incoming: subtitles.Filter(s => s.SubtitleKind is SubtitleKind.Sidecar),
+                SubtitleKind.Sidecar,
+                keyOf: SidecarKey(sidecarIdentity),
+                applyUpdate: ApplySidecarUpdate,
+                dbContext);
 
-            if (toAdd.Count != 0 || toRemove.Count != 0 || toUpdate.Count != 0)
+            if (changed)
             {
-                // add
-                existing.Subtitles.AddRange(toAdd);
-
-                // remove
-                existing.Subtitles.RemoveAll(s => toRemove.Contains(s));
-
-                // update
-                foreach (Subtitle incomingSubtitle in toUpdate)
-                {
-                    Subtitle existingSubtitle =
-                        existing.Subtitles.First(s => s.StreamIndex == incomingSubtitle.StreamIndex);
-
-                    // when the kind, codec, language, or flags change we need to extract again
-                    if (existingSubtitle.IsExtracted)
-                    {
-                        bool differentKind = existingSubtitle.SubtitleKind != incomingSubtitle.SubtitleKind;
-                        bool differentCodec = existingSubtitle.Codec != incomingSubtitle.Codec;
-                        bool differentLanguage = existingSubtitle.Language != incomingSubtitle.Language;
-                        bool differentFlags = existingSubtitle.Default != incomingSubtitle.Default ||
-                                              existingSubtitle.Forced != incomingSubtitle.Forced ||
-                                              existingSubtitle.SDH != incomingSubtitle.SDH;
-
-                        if (differentKind || differentCodec || differentLanguage || differentFlags)
-                        {
-                            existingSubtitle.IsExtracted = false;
-                            existingSubtitle.Path = incomingSubtitle.Path;
-                        }
-                        else
-                        {
-                            // only re-extract if path changed
-                            // this probably won't ever happen?
-                            bool differentPath = existingSubtitle.Path != incomingSubtitle.Path;
-                            if (!string.IsNullOrEmpty(incomingSubtitle.Path) && differentPath)
-                            {
-                                existingSubtitle.IsExtracted = false;
-                                existingSubtitle.Path = incomingSubtitle.Path;
-                            }
-                        }
-                    }
-
-                    existingSubtitle.Default = incomingSubtitle.Default;
-                    existingSubtitle.Forced = incomingSubtitle.Forced;
-                    existingSubtitle.SDH = incomingSubtitle.SDH;
-                    existingSubtitle.Language = incomingSubtitle.Language;
-                    existingSubtitle.SubtitleKind = incomingSubtitle.SubtitleKind;
-                    existingSubtitle.Codec = incomingSubtitle.Codec;
-                    existingSubtitle.DateUpdated = incomingSubtitle.DateUpdated;
-                    existingSubtitle.Title = incomingSubtitle.Title;
-
-                    dbContext.Entry(existingSubtitle).State = EntityState.Modified;
-                }
-
-                int count = await dbContext.SaveChangesAsync(cancellationToken);
-
-                // _logger.LogDebug("Subtitles update changed {Count} records in the db", count);
-
-                return count > 0;
+                return await dbContext.SaveChangesAsync(cancellationToken) > 0;
             }
 
             // nothing to do
-            // _logger.LogDebug("Subtitle update requires no database changes");
             return true;
         }
 
         // no metadata
         // _logger.LogDebug("Subtitle update failure due to missing metadata");
         return false;
+    }
+
+    private static bool MergeSubtitles(
+        Core.Domain.Metadata existing,
+        IEnumerable<Subtitle> incoming,
+        SubtitleKind kind,
+        Func<Subtitle, string> keyOf,
+        Action<Subtitle, Subtitle> applyUpdate,
+        TvContext dbContext)
+    {
+        var incomingList = incoming.ToList();
+        var existingOfKind = existing.Subtitles
+            .Filter(s => s.SubtitleKind == kind)
+            .ToList();
+
+        var existingByKey = new Dictionary<string, Subtitle>();
+        var dupes = new List<Subtitle>();
+        foreach (var e in existingOfKind)
+        {
+            if (!existingByKey.TryAdd(keyOf(e), e))
+            {
+                dupes.Add(e);
+            }
+        }
+
+        var incomingByKey = incomingList.GroupBy(keyOf).ToDictionary(g => g.Key, g => g.First());
+
+        var toAdd = incomingByKey.Values.Where(i => !existingByKey.ContainsKey(keyOf(i))).ToList();
+        var toRemove = existingOfKind.Where(e => !incomingByKey.ContainsKey(keyOf(e)))
+            .Concat(dupes).Distinct()
+            .ToHashSet();
+        var toUpdate = incomingByKey.Values.Where(i => existingByKey.ContainsKey(keyOf(i))).ToList();
+
+        existing.Subtitles.AddRange(toAdd);
+        existing.Subtitles.RemoveAll(toRemove.Contains);
+        foreach (var inc in toUpdate)
+        {
+            var ex = existingByKey[keyOf(inc)];
+            applyUpdate(ex, inc);
+            dbContext.Entry(ex).State = EntityState.Modified;
+        }
+
+        return toAdd.Count != 0 || toRemove.Count != 0 || toUpdate.Count != 0;
+    }
+
+    private static void ApplyEmbeddedUpdate(Subtitle existingSubtitle, Subtitle incomingSubtitle)
+    {
+        // when the kind, codec, language, or flags change we need to extract again
+        if (existingSubtitle.IsExtracted)
+        {
+            bool differentKind = existingSubtitle.SubtitleKind != incomingSubtitle.SubtitleKind;
+            bool differentCodec = existingSubtitle.Codec != incomingSubtitle.Codec;
+            bool differentLanguage = existingSubtitle.Language != incomingSubtitle.Language;
+            bool differentFlags = existingSubtitle.Default != incomingSubtitle.Default ||
+                                  existingSubtitle.Forced != incomingSubtitle.Forced ||
+                                  existingSubtitle.SDH != incomingSubtitle.SDH;
+
+            if (differentKind || differentCodec || differentLanguage || differentFlags)
+            {
+                existingSubtitle.IsExtracted = false;
+                existingSubtitle.Path = incomingSubtitle.Path;
+            }
+            else
+            {
+                // only re-extract if path changed
+                // this probably won't ever happen?
+                bool differentPath = existingSubtitle.Path != incomingSubtitle.Path;
+                if (!string.IsNullOrEmpty(incomingSubtitle.Path) && differentPath)
+                {
+                    existingSubtitle.IsExtracted = false;
+                    existingSubtitle.Path = incomingSubtitle.Path;
+                }
+            }
+        }
+
+        existingSubtitle.Default = incomingSubtitle.Default;
+        existingSubtitle.Forced = incomingSubtitle.Forced;
+        existingSubtitle.SDH = incomingSubtitle.SDH;
+        existingSubtitle.Language = incomingSubtitle.Language;
+        existingSubtitle.SubtitleKind = incomingSubtitle.SubtitleKind;
+        existingSubtitle.Codec = incomingSubtitle.Codec;
+        existingSubtitle.DateUpdated = incomingSubtitle.DateUpdated;
+        existingSubtitle.Title = incomingSubtitle.Title;
+    }
+
+    // media servers give us a stream index but often no usable path (jellyfin sends none at all, emby sends the
+    // same media source id for every stream), so keying those on file name collapses them all into one subtitle
+    private static Func<Subtitle, string> SidecarKey(SidecarSubtitleIdentity identity) =>
+        identity switch
+        {
+            SidecarSubtitleIdentity.StreamIndex => s => $"idx:{s.StreamIndex}",
+            _ => s => $"file:{Path.GetFileName(s.Path)?.ToLowerInvariant()}"
+        };
+
+    private static void ApplySidecarUpdate(Subtitle existingSubtitle, Subtitle incomingSubtitle)
+    {
+        existingSubtitle.Default = incomingSubtitle.Default;
+        existingSubtitle.Forced = incomingSubtitle.Forced;
+        existingSubtitle.SDH = incomingSubtitle.SDH;
+        existingSubtitle.Language = incomingSubtitle.Language;
+        existingSubtitle.SubtitleKind = incomingSubtitle.SubtitleKind;
+        existingSubtitle.Codec = incomingSubtitle.Codec;
+        existingSubtitle.DateUpdated = incomingSubtitle.DateUpdated;
+        existingSubtitle.Title = incomingSubtitle.Title;
+        existingSubtitle.Path = incomingSubtitle.Path;
     }
 }

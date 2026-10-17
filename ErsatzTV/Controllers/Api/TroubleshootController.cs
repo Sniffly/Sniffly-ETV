@@ -7,8 +7,10 @@ using ErsatzTV.Application.Troubleshooting.Queries;
 using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.Interfaces.FFmpeg;
+using ErsatzTV.Core.Interfaces.Locking;
 using ErsatzTV.Core.Interfaces.Repositories;
 using ErsatzTV.Core.Interfaces.Troubleshooting;
+using ErsatzTV.Filters;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
 using Serilog.Context;
@@ -16,12 +18,17 @@ using Serilog.Context;
 namespace ErsatzTV.Controllers.Api;
 
 [ApiController]
+[ServiceFilter(typeof(ConditionalUiAuthorizeFilter))]
 public class TroubleshootController(
     ChannelWriter<IFFmpegWorkerRequest> channelWriter,
     IFileSystem fileSystem,
     IConfigElementRepository configElementRepository,
     ITroubleshootingNotifier notifier,
-    IMediator mediator) : ControllerBase
+    ITroubleshootingPlayoutItemStore troubleshootingPlayoutItemStore,
+    IEntityLocker entityLocker,
+    IMediator mediator,
+    InMemoryLogService logService,
+    ILogger<TroubleshootController> logger) : ControllerBase
 {
     [HttpHead("api/troubleshoot/playback.m3u8")]
     [HttpGet("api/troubleshoot/playback.m3u8")]
@@ -30,6 +37,8 @@ public class TroubleshootController(
         int mediaItem,
         [FromQuery]
         int channel,
+        [FromQuery]
+        StreamingEngine streamingEngine,
         [FromQuery]
         int ffmpegProfile,
         [FromQuery]
@@ -43,6 +52,8 @@ public class TroubleshootController(
         [FromQuery]
         int? subtitleId,
         [FromQuery]
+        string musicVideoCreditsTemplate,
+        [FromQuery]
         int seekSeconds,
         [FromQuery]
         DateTimeOffset? start,
@@ -50,6 +61,11 @@ public class TroubleshootController(
     {
         var sessionId = Guid.NewGuid();
         using var logContext = LogContext.PushProperty(InMemoryLogService.CorrelationIdKey, sessionId);
+
+        // prepare takes the lock; once the start command is queued, its handler owns the lock,
+        // the playout item store and the in-memory logs (written to logs.txt after the process exits)
+        var prepared = false;
+        var started = false;
 
         try
         {
@@ -61,11 +77,13 @@ public class TroubleshootController(
                     streamingMode,
                     mediaItem,
                     channel,
+                    streamingEngine,
                     ffmpegProfile,
                     streamSelector,
                     watermark,
                     graphicsElement,
                     subtitleId,
+                    musicVideoCreditsTemplate,
                     ss,
                     Optional(start)),
                 cancellationToken);
@@ -75,6 +93,8 @@ public class TroubleshootController(
                 return NotFound();
             }
 
+            prepared = true;
+
             foreach (PlayoutItemResult playoutItemResult in result.RightToSeq())
             {
                 Either<BaseError, MediaItemInfo> maybeMediaInfo =
@@ -82,48 +102,71 @@ public class TroubleshootController(
                         new GetMediaItemInfo(await playoutItemResult.MediaItemId.IfNoneAsync(0)),
                         cancellationToken);
 
-                try
+                TroubleshootingInfo troubleshootingInfo = await mediator.Send(
+                    new GetTroubleshootingInfo(NextVersion.Version),
+                    cancellationToken);
+
+                // filter ffmpeg profiles
+                troubleshootingInfo.FFmpegProfiles.RemoveAll(p => p.Id != ffmpegProfile);
+
+                // filter watermarks
+                troubleshootingInfo.Watermarks.RemoveAll(p => !watermark.Contains(p.Id));
+
+                await channelWriter.WriteAsync(
+                    new StartTroubleshootingPlayback(
+                        sessionId,
+                        streamingEngine,
+                        streamSelector,
+                        musicVideoCreditsTemplate,
+                        playoutItemResult,
+                        maybeMediaInfo.ToOption(),
+                        troubleshootingInfo),
+                    cancellationToken);
+
+                started = true;
+
+                string playlistName = "live.m3u8";
+
+                string playlistFile = fileSystem.Path.Combine(
+                    FileSystemLayout.TranscodeTroubleshootingFolder,
+                    playlistName);
+                while (!fileSystem.File.Exists(playlistFile))
                 {
-                    TroubleshootingInfo troubleshootingInfo = await mediator.Send(
-                        new GetTroubleshootingInfo(),
-                        cancellationToken);
-
-                    // filter ffmpeg profiles
-                    troubleshootingInfo.FFmpegProfiles.RemoveAll(p => p.Id != ffmpegProfile);
-
-                    // filter watermarks
-                    troubleshootingInfo.Watermarks.RemoveAll(p => !watermark.Contains(p.Id));
-
-                    await channelWriter.WriteAsync(
-                        new StartTroubleshootingPlayback(
-                            sessionId,
-                            streamSelector,
-                            playoutItemResult,
-                            maybeMediaInfo.ToOption(),
-                            troubleshootingInfo),
-                        cancellationToken);
-
-                    string playlistFile = Path.Combine(FileSystemLayout.TranscodeTroubleshootingFolder, "live.m3u8");
-                    while (!fileSystem.File.Exists(playlistFile))
+                    await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+                    if (notifier.IsFailed(sessionId) || notifier.IsCompleted(sessionId))
                     {
-                        await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
-                        if (cancellationToken.IsCancellationRequested || notifier.IsFailed(sessionId))
-                        {
-                            break;
-                        }
+                        break;
+                    }
+                }
+
+                int initialSegmentCount = await configElementRepository
+                    .GetValue<int>(ConfigElementKey.FFmpegInitialSegmentCount, cancellationToken)
+                    .Map(maybeCount => maybeCount.Match(c => c, () => 1));
+
+                initialSegmentCount = Math.Max(initialSegmentCount, 2);
+
+                string readyFileName = fileSystem.Path.Combine(
+                    FileSystemLayout.TranscodeTroubleshootingFolder,
+                    ".ready");
+
+                bool hasSegments = false;
+                while (!hasSegments)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+                    if (notifier.IsFailed(sessionId) || notifier.IsCompleted(sessionId))
+                    {
+                        break;
                     }
 
-                    int initialSegmentCount = await configElementRepository
-                        .GetValue<int>(ConfigElementKey.FFmpegInitialSegmentCount, cancellationToken)
-                        .Map(maybeCount => maybeCount.Match(c => c, () => 1));
-
-                    initialSegmentCount = Math.Max(initialSegmentCount, 2);
-
-                    bool hasSegments = false;
-                    while (!hasSegments)
+                    if (streamingEngine is StreamingEngine.Next)
                     {
-                        await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
-
+                        if (fileSystem.File.Exists(readyFileName))
+                        {
+                            hasSegments = true;
+                        }
+                    }
+                    else
+                    {
                         string[] segmentFiles = streamingMode switch
                         {
                             // StreamingMode.HttpLiveStreamingSegmenter => Directory.GetFiles(
@@ -137,21 +180,38 @@ public class TroubleshootController(
                             hasSegments = true;
                         }
                     }
+                }
 
-                    if (!notifier.IsFailed(sessionId))
-                    {
-                        return Redirect("~/iptv/session/.troubleshooting/live.m3u8");
-                    }
-                }
-                finally
+                if (notifier.IsFailed(sessionId))
                 {
-                    notifier.RemoveSession(sessionId);
+                    return StatusCode(StatusCodes.Status500InternalServerError, "troubleshooting playback failed");
                 }
+
+                return Redirect($"~/iptv/session/.troubleshooting/{playlistName}");
             }
         }
-        catch (Exception)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            // do nothing
+            // client went away
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Troubleshoot playback failed");
+        }
+        finally
+        {
+            notifier.RemoveSession(sessionId);
+
+            if (!started)
+            {
+                if (prepared)
+                {
+                    troubleshootingPlayoutItemStore.Clear();
+                    entityLocker.UnlockTroubleshootingPlayback();
+                }
+
+                logService.Sink.ClearLogs(sessionId);
+            }
         }
 
         return NotFound();

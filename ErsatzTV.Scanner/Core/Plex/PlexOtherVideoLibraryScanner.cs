@@ -324,10 +324,7 @@ public class PlexOtherVideoLibraryScanner :
             }
         }
 
-        foreach (Tag tag in existingMetadata.Tags
-                     .Filter(g => fullMetadata.Tags.All(g2 => g2.Name != g.Name))
-                     .Filter(g => g.ExternalCollectionId is null)
-                     .ToList())
+        foreach (Tag tag in PlexTagOwnership.TagsToRemove(existingMetadata.Tags, fullMetadata.Tags).ToList())
         {
             existingMetadata.Tags.Remove(tag);
             if (await _metadataRepository.RemoveTag(tag))
@@ -336,9 +333,7 @@ public class PlexOtherVideoLibraryScanner :
             }
         }
 
-        foreach (Tag tag in fullMetadata.Tags
-                     .Filter(g => existingMetadata.Tags.All(g2 => g2.Name != g.Name))
-                     .ToList())
+        foreach (Tag tag in PlexTagOwnership.TagsToAdd(existingMetadata.Tags, fullMetadata.Tags).ToList())
         {
             existingMetadata.Tags.Add(tag);
             if (await _otherVideoRepository.AddTag(existingMetadata, tag))
@@ -347,22 +342,24 @@ public class PlexOtherVideoLibraryScanner :
             }
         }
 
-        if (await _metadataRepository.UpdateSubtitles(existingMetadata, fullMetadata.Subtitles, cancellationToken))
+        if (await _metadataRepository.UpdateSubtitles(
+                existingMetadata,
+                fullMetadata.Subtitles,
+                SidecarSubtitleIdentity.StreamIndex,
+                cancellationToken))
         {
             result.IsUpdated = true;
         }
 
-        /*
-        if (fullMetadata.SortTitle != existingMetadata.SortTitle)
+        if (fullMetadata.SortTitle != existingMetadata.SortTitle || fullMetadata.Title != existingMetadata.Title)
         {
+            existingMetadata.Title = fullMetadata.Title;
             existingMetadata.SortTitle = fullMetadata.SortTitle;
-            // Not existing on IOtherVideoRepository
-            if (await _otherVideoRepository.UpdateSortTitle(existingMetadata))
+            if (await _otherVideoRepository.UpdateTitles(existingMetadata, fullMetadata.Title, fullMetadata.SortTitle))
             {
                 result.IsUpdated = true;
             }
         }
-        */
 
         bool poster = await UpdateArtworkIfNeeded(existingMetadata, fullMetadata, ArtworkKind.Poster);
         bool fanArt = await UpdateArtworkIfNeeded(existingMetadata, fullMetadata, ArtworkKind.FanArt);

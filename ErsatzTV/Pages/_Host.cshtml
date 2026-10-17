@@ -12,42 +12,18 @@
 <head>
     <meta charset="utf-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <title>@if (Assembly.GetEntryAssembly().GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration?.ToLower() != "release") { @(System.Environment.MachineName + " ") }ErsatzTV</title>
+    <title>@if (Assembly.GetEntryAssembly().GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration?.ToLower() != "release") { @(System.Environment.MachineName + " ") }ErsatzTV Legacy</title>
     <base href="~/"/>
     <link href="_content/MudBlazor/MudBlazor.min.css?v=@(Assembly.GetAssembly(typeof(AbstractLocalizationInterceptor))?.GetName().Version?.ToString())" rel="stylesheet"/>
     <link href="css/site.css" asp-append-version="true" rel="stylesheet"/>
     <link href="lib/roboto/roboto.css" asp-append-version="true" rel="stylesheet"/>
     <link href="lib/jqueryui/themes/base/jquery-ui.css" asp-append-version="true" rel="stylesheet"/>
-    <link href="_content/BlazorSortable/css/blazor-sortable.css" rel="stylesheet"/>
     <script src="lib/jquery/jquery.min.js" asp-append-version="true"></script>
     <script src="lib/jqueryui/jquery-ui.min.js" asp-append-version="true"></script>
-    <script src="lib/sortablejs/Sortable.js" asp-append-version="true"></script>
     <script type="module" src="lib/media-chrome/media-chrome.min.js" asp-append-version="true"></script>
     <script src="lib/hls/hls.min.js" asp-append-version="true"></script>
     @await Html.PartialAsync("../Shared/_Favicons")
     <script>
-        function sortableCollection(collectionId) {
-            $("#sortable-collection").sortable({
-                update: function(event, ui) {
-                    const data = $(this).sortable('serialize');
-                    $.ajax({
-                        data: data,
-                        type: 'POST',
-                        url: `media/collections/${collectionId}/items`
-                    });
-                }
-            });
-            $("#sortable-collection").disableSelection();
-        }
-
-        function disableSorting() {
-            $("#sortable-collection").sortable("option", "disabled", true);
-        }
-
-        function enableSorting() {
-            $("#sortable-collection").sortable("option", "disabled", false);
-        }
-
         function styleMarkdown() {
             $("h2").addClass("mud-typography mud-typography-h4");
             $("h3").addClass("mud-typography mud-typography-h5");
@@ -60,11 +36,13 @@
             return false;
         }
 
-        function previewChannel(uri) {
+        // -1 starts a live playlist at the live edge
+        function previewChannel(uri, startPosition = -1) {
           var video = document.getElementById('video');
           if (Hls.isSupported()) {
             var hls = new Hls({
               debug: true,
+              startPosition: startPosition,
               manifestLoadPolicy: {
                 default: {
                   maxTimeToFirstByteMs: Infinity,

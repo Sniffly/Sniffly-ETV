@@ -27,6 +27,10 @@ public class GraphicsEngine(
             ConfigElementKey.FFprobePath,
             cancellationToken);
 
+        Option<string> ffmpegPath = await configElementRepository.GetValue<string>(
+            ConfigElementKey.FFmpegPath,
+            cancellationToken);
+
         var elements = new List<IGraphicsElement>();
         foreach (GraphicsElementContext element in context.Elements)
         {
@@ -41,7 +45,7 @@ public class GraphicsEngine(
 
                     break;
 
-                case ImageElementContext imageElementContext:
+                case ImageElementDataContext imageElementContext:
                     elements.Add(new ImageElement(imageElementContext.ImageElement, logger));
                     break;
 
@@ -54,6 +58,7 @@ public class GraphicsEngine(
                         new MotionElement(
                             motionElementDataContext.MotionElement,
                             ffprobePath,
+                            ffmpegPath,
                             localStatisticsProvider,
                             logger));
                     break;
@@ -74,6 +79,7 @@ public class GraphicsEngine(
                         templateFunctions,
                         tempFilePool,
                         subtitleElementContext.SubtitleElement,
+                        ffmpegPath,
                         variables,
                         logger);
 
@@ -89,8 +95,10 @@ public class GraphicsEngine(
         long frameCount = 0;
         var totalFrames = (long)(context.Duration.TotalSeconds * context.FrameRate.ParsedFrameRate);
 
-        int width = context.FrameSize.Width;
-        int height = context.FrameSize.Height;
+        // elements use full-frame coordinates
+        (int originX, int originY, int width, int height) = context.Region.Match(
+            r => (r.X, r.Y, r.Width, r.Height),
+            () => (0, 0, context.FrameSize.Width, context.FrameSize.Height));
         int frameBufferSize = width * height * 4; // BGRA = 4 bytes
         var skImageInfo = new SKImageInfo(width, height, SKColorType.Bgra8888, SKAlphaType.Unpremul);
 
@@ -174,6 +182,7 @@ public class GraphicsEngine(
                             {
                                 var canvas = surface.Canvas;
                                 canvas.Clear(SKColors.Transparent);
+                                canvas.Translate(-originX, -originY);
 
                                 foreach (PreparedElementImage preparedImage in preparedElementImages)
                                 {
@@ -184,12 +193,20 @@ public class GraphicsEngine(
                                             SKColors.White.WithAlpha((byte)(preparedImage.Opacity * 255)),
                                             SKBlendMode.Modulate);
                                         paint.ColorFilter = colorFilter;
-                                        canvas.DrawBitmap(preparedImage.Image, preparedImage.Point, paint);
+                                        canvas.DrawBitmap(
+                                            preparedImage.Image,
+                                            preparedImage.Point,
+                                            SKSamplingOptions.Default,
+                                            paint);
                                     }
                                     else
                                     {
                                         paint.ColorFilter = null;
-                                        canvas.DrawBitmap(preparedImage.Image, preparedImage.Point, paint);
+                                        canvas.DrawBitmap(
+                                            preparedImage.Image,
+                                            preparedImage.Point,
+                                            SKSamplingOptions.Default,
+                                            paint);
                                     }
 
                                     if (preparedImage.Dispose)

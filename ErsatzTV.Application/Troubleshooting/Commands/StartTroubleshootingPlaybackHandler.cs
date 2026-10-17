@@ -1,12 +1,15 @@
+using System.IO.Abstractions;
 using System.IO.Pipelines;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CliWrap;
+using ErsatzTV.Application.Streaming;
 using ErsatzTV.Core;
 using ErsatzTV.Core.Domain;
 using ErsatzTV.Core.FFmpeg;
 using ErsatzTV.Core.Interfaces.Locking;
+using ErsatzTV.Core.Interfaces.Metadata;
 using ErsatzTV.Core.Interfaces.Streaming;
 using ErsatzTV.Core.Interfaces.Troubleshooting;
 using ErsatzTV.Core.Notifications;
@@ -19,12 +22,15 @@ namespace ErsatzTV.Application.Troubleshooting;
 
 public class StartTroubleshootingPlaybackHandler(
     ITroubleshootingNotifier notifier,
+    ITroubleshootingPlayoutItemStore troubleshootingPlayoutItemStore,
     IMediator mediator,
     IEntityLocker entityLocker,
     IRuntimeInfo runtimeInfo,
     IGraphicsEngine graphicsEngine,
     InMemoryLogService logService,
     LoggingLevelSwitches loggingLevelSwitches,
+    ILocalFileSystem localFileSystem,
+    IFileSystem fileSystem,
     ILogger<StartTroubleshootingPlaybackHandler> logger)
     : IRequestHandler<StartTroubleshootingPlayback>
 {
@@ -59,6 +65,8 @@ public class StartTroubleshootingPlaybackHandler(
                 new
                 {
                     request.TroubleshootingInfo.Version,
+                    request.TroubleshootingInfo.NextVersion,
+                    request.TroubleshootingInfo.FFmpegVersion,
                     Environment = request.TroubleshootingInfo.Environment.OrderBy(x => x.Key)
                         .ToDictionary(x => x.Key, x => x.Value),
                     request.TroubleshootingInfo.Health,
@@ -83,6 +91,22 @@ public class StartTroubleshootingPlaybackHandler(
                     File.Copy(
                         fullPath,
                         Path.Combine(FileSystemLayout.TranscodeTroubleshootingFolder, "stream-selector.yml"));
+                }
+            }
+
+            // write music video credits template
+            if (!string.IsNullOrWhiteSpace(request.MusicVideoCreditsTemplate))
+            {
+                string fullPath = Path.Combine(
+                    FileSystemLayout.MusicVideoCreditsTemplatesFolder,
+                    $"{request.MusicVideoCreditsTemplate}.sbntxt");
+                if (File.Exists(fullPath))
+                {
+                    File.Copy(
+                        fullPath,
+                        Path.Combine(
+                            FileSystemLayout.TranscodeTroubleshootingFolder,
+                            "music-video-credits-template.sbntxt"));
                 }
             }
 
@@ -112,11 +136,17 @@ public class StartTroubleshootingPlaybackHandler(
                     cancellationToken);
             }
 
-            logger.LogDebug(
-                "ffmpeg troubleshooting arguments {FFmpegArguments}",
-                request.PlayoutItemResult.Process.Arguments);
+            if (request.StreamingEngine is StreamingEngine.Legacy)
+            {
+                logger.LogDebug(
+                    "ffmpeg troubleshooting arguments {FFmpegArguments}",
+                    request.PlayoutItemResult.Process.Arguments);
+            }
 
             Option<Pipe> maybePipe = Option<Pipe>.None;
+            var progressParser = new FFmpegProgress();
+            int exitCode = -1;
+            Option<Exception> maybeException = Option<Exception>.None;
 
             try
             {
@@ -138,16 +168,48 @@ public class StartTroubleshootingPlaybackHandler(
                         linkedCts.Token);
                 }
 
-                var progressParser = new FFmpegProgress();
+                var outputPipe = request.StreamingEngine is StreamingEngine.Legacy
+                    ? PipeTarget.ToDelegate(progressParser.ParseLine)
+                    : PipeTarget.ToDelegate(l => NextLogger.LogNextLine(l, logger));
+
+                var errorPipe = request.StreamingEngine is StreamingEngine.Legacy
+                    ? PipeTarget.Null
+                    : PipeTarget.ToDelegate(l => NextLogger.LogNextLine(l, logger));
 
                 CommandResult commandResult = await processWithPipe
                     .WithWorkingDirectory(FileSystemLayout.TranscodeTroubleshootingFolder)
-                    .WithStandardErrorPipe(PipeTarget.Null)
-                    .WithStandardOutputPipe(PipeTarget.ToDelegate(progressParser.ParseLine))
+                    .WithStandardErrorPipe(errorPipe)
+                    .WithStandardOutputPipe(outputPipe)
                     .WithValidation(CommandResultValidation.None)
                     .ExecuteAsync(linkedCts.Token);
 
-                logger.LogDebug("Troubleshooting playback completed with exit code {ExitCode}", commandResult.ExitCode);
+                exitCode = commandResult.ExitCode;
+
+                string processName = request.StreamingEngine is StreamingEngine.Legacy
+                    ? "ffmpeg"
+                    : "ersatztv-channel";
+
+                logger.LogDebug(
+                    "Troubleshooting playback ({ProcessName}) completed with exit code {ExitCode}",
+                    processName,
+                    exitCode);
+
+                if (request.StreamingEngine is StreamingEngine.Next)
+                {
+                    foreach (string dir in localFileSystem.ListSubdirectories(
+                                 FileSystemLayout.TranscodeTroubleshootingFolder))
+                    {
+                        foreach (string file in localFileSystem.ListFiles(dir, "ffreport.log"))
+                        {
+                            foreach (string line in await fileSystem.File.ReadAllLinesAsync(file, cancellationToken))
+                            {
+                                progressParser.ParseLine(line);
+                            }
+
+                            break;
+                        }
+                    }
+                }
 
                 progressParser.LogSpeed(
                     request.MediaItemInfo.Map(i => i.Id),
@@ -155,40 +217,25 @@ public class StartTroubleshootingPlaybackHandler(
                     FileSystemLayout.TranscodeTroubleshootingChannel,
                     logger);
 
-                try
-                {
-                    IEnumerable<string> logs = logService.Sink.GetLogs(request.SessionId);
-                    await File.WriteAllLinesAsync(
-                        Path.Combine(FileSystemLayout.TranscodeTroubleshootingFolder, "logs.txt"),
-                        logs,
-                        linkedCts.Token);
-                    logService.Sink.ClearLogs(request.SessionId);
-                }
-                catch (Exception)
-                {
-                    // do nothing
-                }
-
-                await mediator.Publish(
-                    new PlaybackTroubleshootingCompletedNotification(
-                        commandResult.ExitCode,
-                        Option<Exception>.None,
-                        progressParser.Speed),
-                    linkedCts.Token);
-
-                if (commandResult.ExitCode != 0)
+                if (exitCode != 0)
                 {
                     await linkedCts.CancelAsync();
-                    notifier.NotifyFailed(request.SessionId);
                 }
             }
-            catch (TaskCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                // do nothing
+                notifier.NotifyFailed(request.SessionId);
+                return;
             }
-            catch (Exception e)
+            catch (OperationCanceledException)
             {
-                Console.WriteLine(e);
+                logger.LogWarning("Troubleshooting playback timed out after 2 minutes");
+                maybeException = new TimeoutException("Troubleshooting playback timed out after 2 minutes");
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Troubleshooting playback failed");
+                maybeException = ex;
             }
             finally
             {
@@ -197,9 +244,38 @@ public class StartTroubleshootingPlaybackHandler(
                     await pipe.Writer.CompleteAsync();
                 }
             }
+
+            try
+            {
+                IEnumerable<string> logs = logService.Sink.GetLogs(request.SessionId);
+                await File.WriteAllLinesAsync(
+                    Path.Combine(FileSystemLayout.TranscodeTroubleshootingFolder, "logs.txt"),
+                    logs,
+                    cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to write troubleshooting logs");
+            }
+
+            // unblock the controller before publishing, since a subscriber exception propagates out of Publish
+            if (exitCode == 0 && maybeException.IsNone)
+            {
+                notifier.NotifyCompleted(request.SessionId);
+            }
+            else
+            {
+                notifier.NotifyFailed(request.SessionId);
+            }
+
+            await mediator.Publish(
+                new PlaybackTroubleshootingCompletedNotification(exitCode, maybeException, progressParser.Speed),
+                cancellationToken);
         }
         finally
         {
+            logService.Sink.ClearLogs(request.SessionId);
+            troubleshootingPlayoutItemStore.Clear();
             entityLocker.UnlockTroubleshootingPlayback();
             loggingLevelSwitches.StreamingLevelSwitch.MinimumLevel = currentStreamingLevel;
         }

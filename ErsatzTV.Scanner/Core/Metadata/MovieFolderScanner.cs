@@ -76,6 +76,7 @@ public class MovieFolderScanner : LocalFolderScanner, IMovieFolderScanner
         string ffprobePath,
         decimal progressMin,
         decimal progressMax,
+        bool deepScan,
         CancellationToken cancellationToken)
     {
         try
@@ -161,7 +162,7 @@ public class MovieFolderScanner : LocalFolderScanner, IMovieFolderScanner
                     {
                         _logger.LogDebug("Previously trashed items are now present in folder {Folder}", movieFolder);
                     }
-                    else
+                    else if (!deepScan)
                     {
                         // etag matches and no trashed items are now present, continue to next folder
                         continue;
@@ -174,16 +175,18 @@ public class MovieFolderScanner : LocalFolderScanner, IMovieFolderScanner
                         movieFolder);
                 }
 
+                var hasErrors = false;
+
                 foreach (string file in allFiles.OrderBy(identity))
                 {
                     // TODO: figure out how to rebuild playlists
                     Either<BaseError, MediaItemScanResult<Movie>> maybeMovie = await _movieRepository
                         .GetOrAdd(libraryPath, knownFolder, file, cancellationToken)
-                        .BindT(movie => UpdateStatistics(movie, ffmpegPath, ffprobePath))
+                        .BindT(movie => UpdateStatistics(movie, ffmpegPath, ffprobePath, deepScan))
                         .BindT(video => UpdateLibraryFolderId(video, knownFolder))
-                        .BindT(UpdateMetadata)
-                        .BindT(movie => UpdateArtwork(movie, ArtworkKind.Poster, cancellationToken))
-                        .BindT(movie => UpdateArtwork(movie, ArtworkKind.FanArt, cancellationToken))
+                        .BindT(movie => UpdateMetadata(movie, deepScan))
+                        .BindT(movie => UpdateArtwork(movie, ArtworkKind.Poster, deepScan, cancellationToken))
+                        .BindT(movie => UpdateArtwork(movie, ArtworkKind.FanArt, deepScan, cancellationToken))
                         .BindT(movie => UpdateSubtitles(movie, cancellationToken))
                         .BindT(movie => UpdateChapters(movie, cancellationToken))
                         .BindT(FlagNormal);
@@ -191,6 +194,7 @@ public class MovieFolderScanner : LocalFolderScanner, IMovieFolderScanner
                     foreach (BaseError error in maybeMovie.LeftToSeq())
                     {
                         _logger.LogWarning("Error processing movie at {Path}: {Error}", file, error.Value);
+                        hasErrors = true;
                     }
 
                     foreach (MediaItemScanResult<Movie> result in maybeMovie.RightToSeq())
@@ -200,11 +204,16 @@ public class MovieFolderScanner : LocalFolderScanner, IMovieFolderScanner
                             if (!await _scannerProxy.ReindexMediaItems([result.Item.Id], cancellationToken))
                             {
                                 _logger.LogWarning("Failed to reindex media items from scanner process");
+                                hasErrors = true;
                             }
                         }
-
-                        await _libraryRepository.SetEtag(libraryPath, knownFolder, movieFolder, etag);
                     }
+                }
+
+                // only do this once per folder and only if all files processed successfully
+                if (!hasErrors)
+                {
+                    await _libraryRepository.SetEtag(libraryPath, knownFolder, movieFolder, etag);
                 }
             }
 
@@ -255,7 +264,8 @@ public class MovieFolderScanner : LocalFolderScanner, IMovieFolderScanner
     }
 
     private async Task<Either<BaseError, MediaItemScanResult<Movie>>> UpdateMetadata(
-        MediaItemScanResult<Movie> result)
+        MediaItemScanResult<Movie> result,
+        bool deepScan)
     {
         try
         {
@@ -264,7 +274,7 @@ public class MovieFolderScanner : LocalFolderScanner, IMovieFolderScanner
             Option<string> maybeNfoFile = LocateNfoFile(movie);
             if (maybeNfoFile.IsNone)
             {
-                if (!Optional(movie.MovieMetadata).Flatten().Any())
+                if (deepScan || !Optional(movie.MovieMetadata).Flatten().Any())
                 {
                     string path = movie.MediaVersions.Head().MediaFiles.Head().Path;
                     _logger.LogDebug("Refreshing {Attribute} for {Path}", "Fallback Metadata", path);
@@ -277,7 +287,7 @@ public class MovieFolderScanner : LocalFolderScanner, IMovieFolderScanner
 
             foreach (string nfoFile in maybeNfoFile)
             {
-                bool shouldUpdate = Optional(movie.MovieMetadata).Flatten().HeadOrNone().Match(
+                bool shouldUpdate = deepScan || Optional(movie.MovieMetadata).Flatten().HeadOrNone().Match(
                     m => m.MetadataKind == MetadataKind.Fallback ||
                          m.DateUpdated != _localFileSystem.GetLastWriteTime(nfoFile),
                     true);
@@ -303,6 +313,7 @@ public class MovieFolderScanner : LocalFolderScanner, IMovieFolderScanner
     private async Task<Either<BaseError, MediaItemScanResult<Movie>>> UpdateArtwork(
         MediaItemScanResult<Movie> result,
         ArtworkKind artworkKind,
+        bool deepScan,
         CancellationToken cancellationToken)
     {
         try
@@ -313,7 +324,7 @@ public class MovieFolderScanner : LocalFolderScanner, IMovieFolderScanner
                 Option<string> maybeArtwork = LocateArtwork(movie, artworkKind);
                 foreach (string posterFile in maybeArtwork)
                 {
-                    await RefreshArtwork(posterFile, metadata, artworkKind, None, None, cancellationToken);
+                    await RefreshArtwork(posterFile, metadata, artworkKind, None, None, deepScan, cancellationToken);
                 }
 
                 if (maybeArtwork.IsNone && metadata.Artwork.Any(a => a.ArtworkKind == artworkKind))

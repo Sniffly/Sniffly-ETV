@@ -15,7 +15,7 @@ namespace ErsatzTV.Infrastructure.Sqlite.Migrations
         protected override void BuildModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
-            modelBuilder.HasAnnotation("ProductVersion", "9.0.12");
+            modelBuilder.HasAnnotation("ProductVersion", "9.0.15");
 
             modelBuilder.Entity("ErsatzTV.Core.Domain.Actor", b =>
                 {
@@ -318,6 +318,9 @@ namespace ErsatzTV.Infrastructure.Sqlite.Migrations
                         .HasColumnType("varchar(50)")
                         .UseCollation("NOCASE");
 
+                    b.Property<int>("NextEngineTextSubtitleMode")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("Number")
                         .HasColumnType("TEXT");
 
@@ -357,6 +360,9 @@ namespace ErsatzTV.Infrastructure.Sqlite.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<int>("StreamSelectorMode")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("StreamingEngine")
                         .HasColumnType("INTEGER");
 
                     b.Property<int>("StreamingMode")
@@ -1319,10 +1325,16 @@ namespace ErsatzTV.Infrastructure.Sqlite.Migrations
                     b.Property<bool>("Default")
                         .HasColumnType("INTEGER");
 
+                    b.Property<int?>("DvProfile")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("FileName")
                         .HasColumnType("TEXT");
 
                     b.Property<bool>("Forced")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("HasHdr10Metadata")
                         .HasColumnType("INTEGER");
 
                     b.Property<int>("Index")
@@ -1345,6 +1357,9 @@ namespace ErsatzTV.Infrastructure.Sqlite.Migrations
 
                     b.Property<string>("Profile")
                         .HasColumnType("TEXT");
+
+                    b.Property<int?>("Rotation")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("Title")
                         .HasColumnType("TEXT");
@@ -2935,6 +2950,9 @@ namespace ErsatzTV.Infrastructure.Sqlite.Migrations
                     b.Property<int>("PlayoutId")
                         .HasColumnType("INTEGER");
 
+                    b.Property<int?>("Seed")
+                        .HasColumnType("INTEGER");
+
                     b.Property<DateTime>("When")
                         .HasColumnType("TEXT");
 
@@ -3934,6 +3952,9 @@ namespace ErsatzTV.Infrastructure.Sqlite.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<DateTime?>("LastCollectionsScan")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("MissingSince")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Platform")
@@ -5028,6 +5049,9 @@ namespace ErsatzTV.Infrastructure.Sqlite.Migrations
                                     b2.Property<int>("Seed")
                                         .HasColumnType("INTEGER");
 
+                                    b2.Property<bool>("Started")
+                                        .HasColumnType("INTEGER");
+
                                     b2.HasKey("PlayoutAnchorPlayoutId");
 
                                     b2.ToTable("ScheduleItemsEnumeratorState", (string)null);
@@ -5176,6 +5200,9 @@ namespace ErsatzTV.Infrastructure.Sqlite.Migrations
                             b1.Property<int>("Seed")
                                 .HasColumnType("INTEGER");
 
+                            b1.Property<bool>("Started")
+                                .HasColumnType("INTEGER");
+
                             b1.HasKey("PlayoutProgramScheduleAnchorId");
 
                             b1.ToTable("CollectionEnumeratorState", (string)null);
@@ -5224,6 +5251,9 @@ namespace ErsatzTV.Infrastructure.Sqlite.Migrations
                                 .HasColumnType("INTEGER");
 
                             b1.Property<int>("Seed")
+                                .HasColumnType("INTEGER");
+
+                            b1.Property<bool>("Started")
                                 .HasColumnType("INTEGER");
 
                             b1.HasKey("PlayoutScheduleItemFillGroupIndexId");

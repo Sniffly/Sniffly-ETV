@@ -1,4 +1,4 @@
-﻿using ErsatzTV.Core;
+using ErsatzTV.Core;
 using ErsatzTV.Core.Interfaces.GitHub;
 using Refit;
 
@@ -10,7 +10,7 @@ public class GitHubApiClient : IGitHubApiClient
     {
         try
         {
-            IGitHubApi service = RestService.For<IGitHubApi>("https://api.github.com");
+            IGitHubApi service = RestService.ForGenerated<IGitHubApi>("https://api.github.com");
             return await service.GetReleases(cancellationToken).Map(releases => releases.Head().Body);
         }
         catch (Exception ex)
@@ -23,8 +23,21 @@ public class GitHubApiClient : IGitHubApiClient
     {
         try
         {
-            IGitHubApi service = RestService.For<IGitHubApi>("https://api.github.com");
+            IGitHubApi service = RestService.ForGenerated<IGitHubApi>("https://api.github.com");
             return await service.GetTag(tag, cancellationToken).Map(t => t.Body);
+        }
+        catch (Exception ex)
+        {
+            return BaseError.New(ex.ToString());
+        }
+    }
+
+    public async Task<Either<BaseError, string>> GetDevelopReleaseNotes(string tag, CancellationToken cancellationToken)
+    {
+        try
+        {
+            IGitHubApi service = RestService.ForGenerated<IGitHubApi>("https://api.github.com");
+            return await service.GetDevelopTag(tag, cancellationToken).Map(t => t.Body);
         }
         catch (Exception ex)
         {
